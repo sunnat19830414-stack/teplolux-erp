@@ -20,7 +20,7 @@ jobs:
         php: ['8.2', '8.3']
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Установить PHP ${{ matrix.php }}
         uses: shivammathur/setup-php@v2
@@ -47,9 +47,9 @@ jobs:
     name: Синтаксис JavaScript
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '20'
 
@@ -72,7 +72,7 @@ jobs:
     name: Секреты не попали в репозиторий
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Главный риск этого репозитория — не сломанный код, а случайно закоммиченный
       # API-ключ или пароль от базы. Проверяем на каждый push.
