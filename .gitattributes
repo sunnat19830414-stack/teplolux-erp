@@ -1,0 +1,18 @@
+# В репозитории — LF, в рабочей копии на Windows — CRLF.
+# Без этого каждый коммит с сервера показывал бы «изменён весь файл» из-за переводов строк.
+* text=auto eol=lf
+
+# PowerShell 5.1 капризен к переводам строк — оставляем CRLF на диске.
+*.ps1 text eol=crlf
+
+# web.config читает IIS на Windows.
+web.config text eol=crlf
+
+# Двоичное — не трогать.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.xls binary
+*.xlsx binary

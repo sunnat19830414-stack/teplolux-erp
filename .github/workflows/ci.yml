@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  php-syntax:
+    name: Синтаксис PHP
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 8.2 — то, что стоит на сервере сейчас. 8.3 — чтобы заранее видеть,
+        # что сломается при обновлении, а не в момент переезда на VPS.
+        php: ['8.2', '8.3']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      - name: Проверить синтаксис всех PHP-файлов
+        run: |
+          set -e
+          fail=0
+          count=0
+          while IFS= read -r -d '' f; do
+            count=$((count + 1))
+            if ! out=$(php -l "$f" 2>&1); then
+              echo "::error file=$f::$out"
+              fail=1
+            fi
+          done < <(find custom patches -name '*.php' -type f -print0)
+          echo "Проверено файлов: $count"
+          exit $fail
+
+  javascript-syntax:
+    name: Синтаксис JavaScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Проверить синтаксис .js
+        run: |
+          set -e
+          fail=0
+          count=0
+          while IFS= read -r -d '' f; do
+            count=$((count + 1))
+            if ! out=$(node --check "$f" 2>&1); then
+              echo "::error file=$f::$out"
+              fail=1
+            fi
+          done < <(find custom -name '*.js' -type f -print0)
+          echo "Проверено файлов: $count"
+          exit $fail
+
+  secrets:
+    name: Секреты не попали в репозиторий
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Главный риск этого репозитория — не сломанный код, а случайно закоммиченный
+      # API-ключ или пароль от базы. Проверяем на каждый push.
+      - name: Искать ключи и пароли
+        run: |
+          set -e
+          fail=0
+
+          if grep -rnoE "[0-9a-f]{32,}" custom --include='*.php' ; then
+            echo "::error::Похоже на API-ключ в коде. Ключи хранятся только в конфигах на сервере."
+            fail=1
+          fi
+
+          if grep -rnE "'(password|app_password|pass)'[[:space:]]*=>[[:space:]]*'" custom --include='*.php' \
+             | grep -v 'ЗАМЕНИТЬ' ; then
+            echo "::error::Незаменённый пароль в коде. В репозитории только *.example.php с заглушками."
+            fail=1
+          fi
+
+          for f in $(find custom -name 'config.php' -o -name 'db.local.php' \
+                     -o -name 'config.zhomi.php' -o -name 'config.turk.php'); do
+            echo "::error file=$f::Рабочий конфиг не должен попадать в репозиторий (см. .gitignore)."
+            fail=1
+          done
+
+          if [ $fail -eq 0 ]; then echo "Секретов не найдено."; fi
+          exit $fail

@@ -1,0 +1,18 @@
+--- up/core/lib/functions.lib.php	2026-09-05 07:41:37.069539700 +0500
++++ /c/Dolibarr/htdocs/core/lib/functions.lib.php	2026-09-02 14:18:24.071153300 +0500
+@@ -173,7 +173,14 @@
+ 			$module = 'supplier_invoice';
+ 			break;
+ 		case 'order_supplier':
+-			$module = 'supplier_order';
++			// [Теплолюкс/NodirTool, 03.09.2026] Было "$module = 'supplier_order'; break;" — но ниже
++			// по функции нет отдельного case для 'supplier_order', так что путь оставался
++			// НЕПРАВИЛЬНЫМ (искал папку "supplier_order", а не настоящую "fournisseur/commande",
++			// куда реально пишет api_documents.class.php::post()) — из-за этого GET /documents для
++			// заказов поставщику всегда возвращал пустой список, даже когда файлы физически на
++			// месте. Приводим сразу к тому же результату, что и case 'commande_fournisseur' ниже.
++			$module = 'fournisseur';
++			$subdirectory = '/commande';
+ 			break;
+ 		case 'recruitmentjobposition':
+ 			$module = 'recruitment';

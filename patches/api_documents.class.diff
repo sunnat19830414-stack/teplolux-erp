@@ -1,0 +1,19 @@
+--- up/api/class/api_documents.class.php	2026-09-05 07:41:38.174540300 +0500
++++ /c/Dolibarr/htdocs/api/class/api_documents.class.php	2026-09-02 14:26:59.812394400 +0500
+@@ -657,8 +657,15 @@
+ 					}
+ 
+ 					// Select only files that match the requested $content_type, if provided
++					// [Теплолюкс/NodirTool, 03.09.2026] Было "if (!empty($arraycontenttype))" — но
++					// explode(",", "") возвращает [""] (массив с ОДНИМ пустым элементом, не пустой
++					// массив), поэтому !empty(...) было ИСТИНОЙ даже когда $content_type вообще не
++					// передан, и фильтр отсекал ВСЕ файлы (ни у одного реального файла content-type
++					// не бывает пустой строкой) — список документов по этому эндпоинту всегда
++					// возвращал пусто, даже когда файлы физически на месте. Добавлена явная проверка,
++					// что $content_type реально задан, как и написано в комментарии выше ("if provided").
+ 					$arraycontenttype = explode(",", $content_type);
+-					if (!empty($arraycontenttype)) {
++					if ($content_type !== '' && !empty($arraycontenttype)) {
+ 						$filearray = array_filter(
+ 							$filearray,
+ 							/**

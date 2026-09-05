@@ -1,0 +1,18 @@
+--- up/core/lib/files.lib.php	2026-09-05 07:41:35.902446800 +0500
++++ /c/Dolibarr/htdocs/core/lib/files.lib.php	2026-09-02 14:09:02.613067300 +0500
+@@ -3092,6 +3092,15 @@
+ 		$modulepart = 'delivery';
+ 	} elseif ($modulepart == 'propale') {
+ 		$modulepart = 'propal';
++	} elseif ($modulepart == 'supplier_order') {
++		// [Теплолюкс/NodirTool, 03.09.2026] api_documents.class.php::post() normalizes both
++		// 'commande_fournisseur' and 'supplier_order' to 'supplier_order' before calling this
++		// function, but this function's own permission-check branch below only recognizes
++		// 'commande_fournisseur'/'order_supplier' - real Dolibarr naming mismatch, not a
++		// third-party issue. Without this alias, uploading a document to a supplier order via the
++		// REST API always fails with "Access not allowed to upload file into this directory",
++		// even for a user with full purchasing rights. Re-apply after any Dolibarr upgrade.
++		$modulepart = 'commande_fournisseur';
+ 	}
+ 
+ 	//print 'dol_check_secure_access_document modulepart='.$modulepart.' original_file='.$original_file.' entity='.$entity;

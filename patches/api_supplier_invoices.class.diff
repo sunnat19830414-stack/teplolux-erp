@@ -1,0 +1,21 @@
+--- up/fourn/class/api_supplier_invoices.class.php	2026-09-05 07:41:34.636052100 +0500
++++ /c/Dolibarr/htdocs/fourn/class/api_supplier_invoices.class.php	2026-08-29 08:11:45.508898500 +0500
+@@ -562,7 +562,17 @@
+ 		$amounts[$id] = $paymentamount;
+ 
+ 		// Multicurrency
+-		$newvalue = (float) price2num($this->invoice->multicurrency_total_ttc, 'MT');
++		// ВАЖНО (найдено и исправлено 29.08.2026, TeplouxERP): раньше здесь безусловно писалось
++		// multicurrency_total_ttc (ВЕСЬ остаток счёта), даже если $paymentamount — частичная сумма.
++		// PaiementFourn::getWay() видит непустой multicurrency_amounts и переключается на способ 'customer',
++		// после чего PaiementFourn::create() использует ИМЕННО multicurrency_amounts как основной массив сумм —
++		// в результате любая частичная оплата (amount < total_ttc) молча закрывала счёт целиком.
++		// Теперь считаем multicurrency-сумму пропорционально РЕАЛЬНО запрошенной сумме оплаты, а не полной сумме счёта.
++		$multicurrency_tx = (float) $this->invoice->multicurrency_tx;
++		if (empty($multicurrency_tx)) {
++			$multicurrency_tx = 1;
++		}
++		$newvalue = (float) price2num($paymentamount * $multicurrency_tx, 'MT');
+ 		$multicurrency_amounts[$id] = $newvalue;
+ 
+ 		// Creation of payment line
