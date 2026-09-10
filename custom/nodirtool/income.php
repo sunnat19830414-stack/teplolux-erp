@@ -33,17 +33,9 @@ if (!empty($cfg['boss_cash_account'])) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
-    if ($action === 'add_source') {
-        $r = income_add_source($_POST['source_name'] ?? '');
-        flash_set($r['ok'] ? 'Источник дохода добавлен.' : $r['error'], $r['ok'] ? 'ok' : 'err');
-        header('Location: income.php?from=' . urlencode($from) . '&to=' . urlencode($to));
-        exit;
-    } elseif ($action === 'toggle_source') {
-        income_set_source_active((int)($_POST['source_id'] ?? 0), !empty($_POST['make_active']));
-        flash_set('Источник обновлён.', 'ok');
-        header('Location: income.php?from=' . urlencode($from) . '&to=' . urlencode($to));
-        exit;
-    } elseif ($action === 'add_income') {
+    // Источники с 06.09.2026 живут в отдельном разделе «Справочники → Источники доходов»
+    // (income_sources.php) — здесь их больше не заводят.
+    if ($action === 'add_income') {
         $accKey = $_POST['account'] ?? '';
         $acc = $moneyAccounts[$accKey] ?? null;
         $incomeDate = $_POST['income_date'] ?? date('Y-m-d');
@@ -100,13 +92,14 @@ require __DIR__ . '/includes/layout_top.php';
 
 <h1>Доходы</h1>
 <p class="muted">Деньги, которые приходят не от продажи товара: электричество с солнечных батарей,
-аренда, услуги и работы и всё остальное. Источники заводите сами — как вам удобно.</p>
+аренда, услуги и работы и всё остальное. Источники заводятся в разделе <a href="income_sources.php">Справочники</a>.</p>
 <?php if ($message): ?><p class="<?= $messageType ?>"><?= nl2br(htmlspecialchars($message)) ?></p><?php endif; ?>
 
 <div class="card">
   <h2>Записать доход</h2>
   <?php if (empty($sources)): ?>
-    <p class="muted">Сначала заведите хотя бы один источник — форма ниже.</p>
+    <p class="muted">Сначала заведите хотя бы один источник —
+    <a href="income_sources.php">Справочники → Источники доходов</a>.</p>
   <?php else: ?>
     <form method="post">
       <?= csrf_field() ?>
@@ -216,41 +209,11 @@ require __DIR__ . '/includes/layout_top.php';
 
 <div class="card">
   <h2>Источники дохода</h2>
-  <form method="post" class="row" style="align-items:end; margin-bottom:12px">
-    <?= csrf_field() ?>
-    <input type="hidden" name="action" value="add_source">
-    <div><label>Новый источник</label>
-      <input type="text" name="source_name" placeholder="например: Солнечные батареи · Аренда склада · Услуги и работы"></div>
-    <div style="flex:0"><button type="submit" class="secondary">Добавить</button></div>
-  </form>
-  <?php if (empty($allSources)): ?>
-    <p class="muted">Пока нет ни одного источника.</p>
-  <?php else: ?>
-    <table>
-      <tr><th>Название</th><th>Состояние</th><th></th></tr>
-      <?php foreach ($allSources as $s): ?>
-        <tr<?= $s['active'] ? '' : ' class="muted"' ?>>
-          <td><?= htmlspecialchars($s['name']) ?></td>
-          <td><?= $s['active'] ? '<span class="badge badge-ok">используется</span>' : '<span class="badge badge-neutral">скрыт</span>' ?></td>
-          <td>
-            <form method="post" style="display:inline">
-              <?= csrf_field() ?>
-              <input type="hidden" name="action" value="toggle_source">
-              <input type="hidden" name="source_id" value="<?= (int)$s['rowid'] ?>">
-              <?php if ($s['active']): ?>
-                <button type="submit" class="secondary small">Скрыть</button>
-              <?php else: ?>
-                <input type="hidden" name="make_active" value="1">
-                <button type="submit" class="secondary small">Вернуть</button>
-              <?php endif; ?>
-            </form>
-          </td>
-        </tr>
-      <?php endforeach; ?>
-    </table>
-    <p class="muted" style="margin-top:8px">Скрытый источник пропадает из выбора при записи дохода,
-    но прошлые поступления по нему остаются в отчёте.</p>
-  <?php endif; ?>
+  <p class="muted">Список источников теперь общий для всех справочников — он живёт в разделе
+  <a href="income_sources.php">Справочники → Источники доходов</a>. Там же их можно переименовать
+  или скрыть.</p>
+  <p class="muted">Сейчас заведено: <strong><?= count($allSources) ?></strong>,
+  из них показывается при вводе: <strong><?= count($sources) ?></strong>.</p>
 </div>
 
 <script>

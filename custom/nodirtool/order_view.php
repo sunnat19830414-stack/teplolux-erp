@@ -127,7 +127,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $shortfallUsd += $missing * (float)($l['subprice'] ?? 0);
             $shortfallDesc[] = ($l['product_label'] ?? $l['desc'] ?? '?') . ' ×' . rtrim(rtrim(number_format($missing, 3, '.', ''), '0'), '.');
         }
-        if ($shortfallUsd <= 0.01) {
+        // C1 (финансовый аудит 05.09.2026): повторный клик создавал ВТОРУЮ кредит-ноту и удваивал
+        // долг поставщика — проверки не было вообще. Проверяем ЗДЕСЬ, в обработчике, а не только
+        // при показе кнопки: кнопку можно нажать дважды до перерисовки страницы.
+        $alreadyDoc = find_shortfall_document($api, (int)$orderNow['socid'], (string)($orderNow['ref'] ?? ''));
+
+        if ($alreadyDoc) {
+            $message = 'Недопоставка по этому заказу уже зафиксирована документом '
+                . ($alreadyDoc['ref'] ?? '') . ' — второй раз долг поставщика не начисляем. '
+                . 'Он виден в выписке поставщика.';
+            $messageType = 'err';
+        } elseif ($shortfallUsd <= 0.01) {
             $message = 'Недопоставки по этому заказу нет — фиксировать нечего.';
             $messageType = 'err';
         } else {
@@ -647,8 +657,20 @@ $mailHistory = mail_log_for_order($id);
       <?php endforeach; ?>
     </table>
     <?php // Недопоставка при ПРЕДОПЛАТЕ — заплатили вперёд за то, что не привезли (03.09.2026).
-          // Кнопка ручная, показывается только когда приёмка реально была И осталась недостача. ?>
-    <?php if ($supplierPaymentTerms === 'prepay' && $anyReceiptAtAll && $shortfallUsdView > 0.01): ?>
+          // Кнопка ручная, показывается только когда приёмка реально была И осталась недостача.
+          // C1 (аудит 05.09.2026): если недопоставка уже зафиксирована — кнопки нет вовсе, вместо
+          // неё видно, каким документом. Настоящая защита при этом в обработчике: кнопку можно
+          // успеть нажать дважды до перерисовки страницы.
+          require_once __DIR__ . '/includes/supplier_statement.php';
+          $shortfallDocView = ($supplierPaymentTerms === 'prepay' && $anyReceiptAtAll)
+              ? find_shortfall_document($api, (int)$order['socid'], (string)($order['ref'] ?? ''))
+              : null;
+    ?>
+    <?php if ($shortfallDocView): ?>
+      <p class="ok" style="margin-top:14px; display:inline-block">
+        Недопоставка уже зафиксирована документом <?= htmlspecialchars($shortfallDocView['ref'] ?? '') ?>
+        — долг поставщика начислен, повторно не нужно.</p>
+    <?php elseif ($supplierPaymentTerms === 'prepay' && $anyReceiptAtAll && $shortfallUsdView > 0.01): ?>
       <div class="warn" style="margin-top:14px; display:block">
         <strong>Недопоставка на <?= number_format($shortfallUsdView, 2) ?> $.</strong>
         Поставщик работает по предоплате — значит за это уже заплачено, но товар не приехал.
@@ -735,7 +757,7 @@ $mailHistory = mail_log_for_order($id);
       <div>
         <label>Вид расхода</label>
         <select name="expense_type">
-          <?php foreach (LOGISTICS_EXPENSE_TYPES as $key => $label): ?>
+          <?php foreach (logistics_expense_types() as $key => $label): ?>
             <option value="<?= $key ?>"><?= htmlspecialchars($label) ?></option>
           <?php endforeach; ?>
         </select>
@@ -786,7 +808,7 @@ $mailHistory = mail_log_for_order($id);
       <?php foreach ($expenses as $e): ?>
         <?php $carr = !empty($e['fk_carrier']) ? ($carrierNamesById[(int)$e['fk_carrier']] ?? null) : null; ?>
         <tr>
-          <td><?= htmlspecialchars(LOGISTICS_EXPENSE_TYPES[$e['expense_type']] ?? $e['expense_type']) ?></td>
+          <td><?= htmlspecialchars(logistics_expense_type_label($e['expense_type'])) ?></td>
           <td><?= number_format((float)$e['native_amount'], 2) ?> <?= htmlspecialchars($e['native_currency']) ?><?= $e['rate'] ? ' (курс ' . number_format((float)$e['rate'], 2) . ')' : '' ?></td>
           <td><?= number_format((float)$e['usd_amount'], 2) ?> $</td>
           <td class="muted"><?= $carr ? htmlspecialchars($carr['name'] ?? $carr['nom'] ?? '') : '—' ?></td>

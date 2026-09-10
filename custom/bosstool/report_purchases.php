@@ -13,7 +13,11 @@ $names = $api->getThirdpartiesByIds(array_merge(
     array_slice(array_keys($debts), 0, 20),
     array_map(fn($t) => $t['socid'], $p['transit_rows'])
 ));
-$totalDebt = array_sum($debts);
+// Итог по всем поставщикам — тоже по валютам: сложить евро с долларами в одно число нельзя.
+$totalDebtByCur = [];
+foreach ($debts as $byCur) {
+    foreach ($byCur as $cur => $sum) $totalDebtByCur[$cur] = ($totalDebtByCur[$cur] ?? 0) + $sum;
+}
 
 require __DIR__ . '/includes/layout_top.php';
 ?>
@@ -30,7 +34,7 @@ require __DIR__ . '/includes/layout_top.php';
       <div class="muted">заказов: <?= (int)$p['order_count'] ?></div></div>
     <div class="kpi"><div class="k">Сейчас в пути</div><div class="v"><?= money($p['in_transit']) ?></div>
       <div class="muted">заказов: <?= (int)$p['in_transit_count'] ?></div></div>
-    <div class="kpi"><div class="k">Должны поставщикам</div><div class="v neg"><?= money($totalDebt) ?></div>
+    <div class="kpi"><div class="k">Должны поставщикам</div><div class="v neg"><?= htmlspecialchars(money_by_currency($totalDebtByCur)) ?></div>
       <div class="muted">по неоплаченным счетам</div></div>
   </div>
 </div>
@@ -99,10 +103,10 @@ require __DIR__ . '/includes/layout_top.php';
     <p class="ok">Неоплаченных счетов нет.</p>
   <?php else: ?>
     <table>
-      <tr><th>Поставщик</th><th class="num">Долг, $</th></tr>
-      <?php foreach (array_slice($debts, 0, 20, true) as $socId => $sum): ?>
+      <tr><th>Поставщик</th><th class="num">Долг</th></tr>
+      <?php foreach (array_slice($debts, 0, 20, true) as $socId => $byCur): ?>
         <tr><td><?= htmlspecialchars($names[$socId]['name'] ?? ('#' . $socId)) ?></td>
-            <td class="num" style="color:var(--danger)"><?= number_format($sum, 2, '.', ' ') ?></td></tr>
+            <td class="num" style="color:var(--danger)"><?= htmlspecialchars(money_by_currency($byCur)) ?></td></tr>
       <?php endforeach; ?>
     </table>
   <?php endif; ?>

@@ -176,6 +176,8 @@
     border-bottom: 1px solid var(--border); flex-wrap: wrap;
   }
   .doc-block-total { margin-left: auto; font-weight: 700; }
+  .doc-block-xls { text-decoration: none; font-size: 16px; line-height: 1; padding: 2px 4px; }
+  .doc-block-xls:hover { opacity: .7; }
   .doc-block table { margin: 0; }
   .doc-block th, .doc-block td { padding: 7px 14px; }
   .doc-block tr:first-child th { border-top: none; }
@@ -236,6 +238,7 @@ if ($__cashAcc) {
       <a href="transfer.php" class="<?= $__page === 'transfer.php' ? 'active' : '' ?>">Перемещение</a>
       <a href="inventory.php" class="<?= $__page === 'inventory.php' ? 'active' : '' ?>">Инвентаризация</a>
       <a href="stock.php" class="<?= $__page === 'stock.php' ? 'active' : '' ?>">Остатки</a>
+      <a href="catalog.php" class="<?= $__page === 'catalog.php' ? 'active' : '' ?>">Каталог товаров</a>
     </nav>
     <div class="sidebar-footer"><a href="logout.php">Выход</a></div>
   </aside>

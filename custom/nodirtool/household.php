@@ -33,17 +33,9 @@ foreach ($cfg['currency_accounts'] as $code => $accId) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
-    if ($action === 'add_category') {
-        $r = household_add_category($_POST['category_name'] ?? '');
-        flash_set($r['ok'] ? 'Категория добавлена.' : $r['error'], $r['ok'] ? 'ok' : 'err');
-        header('Location: household.php?from=' . urlencode($from) . '&to=' . urlencode($to));
-        exit;
-    } elseif ($action === 'toggle_category') {
-        household_set_category_active((int)($_POST['category_id'] ?? 0), !empty($_POST['make_active']));
-        flash_set('Категория обновлена.', 'ok');
-        header('Location: household.php?from=' . urlencode($from) . '&to=' . urlencode($to));
-        exit;
-    } elseif ($action === 'add_expense') {
+    // Категории с 06.09.2026 живут в отдельном разделе «Справочники → Категории хозрасходов»
+    // (expense_categories.php) — здесь их больше не заводят, чтобы список был в одном месте.
+    if ($action === 'add_expense') {
         $accKey = $_POST['account'] ?? '';
         $acc = $moneyAccounts[$accKey] ?? null;
         $expenseDate = $_POST['expense_date'] ?? date('Y-m-d');
@@ -88,7 +80,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     } elseif ($action === 'delete_expense') {
-        $r = household_delete_expense($api, (int)($_POST['expense_id'] ?? 0));
+        // Удалить можно только свой расход (LOW-пункт аудита 05.09.2026). Передаём и имя, и логин:
+        // в поле `who` NodirTool пишет имя, а BossTool — логин.
+        $r = household_delete_expense($api, (int)($_POST['expense_id'] ?? 0),
+            [$who, $_SESSION['user']['login'] ?? '']);
         flash_set($r['ok'] ? ('Расход удалён.' . (!empty($r['note']) ? ' ' . $r['note'] : '')) : $r['error'], $r['ok'] ? 'ok' : 'err');
         header('Location: household.php?from=' . urlencode($from) . '&to=' . urlencode($to));
         exit;
@@ -107,13 +102,14 @@ require __DIR__ . '/includes/layout_top.php';
 
 <h1>Хозрасходы и коммуналка</h1>
 <p class="muted">Свет, вода, аренда, канцелярия и всё остальное, что не относится к закупке товара.
-Категории заводите сами — как вам удобно.</p>
+Категории заводятся в разделе <a href="expense_categories.php">Справочники</a>.</p>
 <?php if ($message): ?><p class="<?= $messageType ?>"><?= nl2br(htmlspecialchars($message)) ?></p><?php endif; ?>
 
 <div class="card">
   <h2>Записать расход</h2>
   <?php if (empty($categories)): ?>
-    <p class="muted">Сначала заведите хотя бы одну категорию — форма ниже.</p>
+    <p class="muted">Сначала заведите хотя бы одну категорию —
+    <a href="expense_categories.php">Справочники → Категории хозрасходов</a>.</p>
   <?php else: ?>
     <form method="post">
       <?= csrf_field() ?>
@@ -207,13 +203,26 @@ require __DIR__ . '/includes/layout_top.php';
           <td class="muted"><?= htmlspecialchars($e['comment'] ?? '') ?></td>
           <td class="muted"><?= htmlspecialchars($e['who'] ?? '') ?></td>
           <td>
-            <form method="post" style="display:inline"
-                  onsubmit="return appConfirmSubmit(this, 'Удалить этот расход? Деньги вернутся на счёт, с которого были списаны.');">
-              <?= csrf_field() ?>
-              <input type="hidden" name="action" value="delete_expense">
-              <input type="hidden" name="expense_id" value="<?= (int)$e['rowid'] ?>">
-              <button type="submit" class="secondary small">✕</button>
-            </form>
+            <?php
+              // Кнопка только у своих расходов — чужие удалять нельзя (проверка есть и на сервере,
+              // здесь просто не показываем то, что всё равно не сработает).
+              $author = mb_strtolower(trim((string)($e['who'] ?? '')));
+              $isMine = $author !== '' && (
+                  $author === mb_strtolower(trim($who))
+                  || $author === mb_strtolower(trim((string)($_SESSION['user']['login'] ?? '')))
+              );
+            ?>
+            <?php if ($isMine): ?>
+              <form method="post" style="display:inline"
+                    onsubmit="return appConfirmSubmit(this, 'Удалить этот расход? Деньги вернутся на счёт, с которого были списаны.');">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="delete_expense">
+                <input type="hidden" name="expense_id" value="<?= (int)$e['rowid'] ?>">
+                <button type="submit" class="secondary small">✕</button>
+              </form>
+            <?php else: ?>
+              <span class="muted" title="Удалить может только тот, кто внёс расход">—</span>
+            <?php endif; ?>
           </td>
         </tr>
       <?php endforeach; ?>
@@ -223,41 +232,11 @@ require __DIR__ . '/includes/layout_top.php';
 
 <div class="card">
   <h2>Категории</h2>
-  <form method="post" class="row" style="align-items:end; margin-bottom:12px">
-    <?= csrf_field() ?>
-    <input type="hidden" name="action" value="add_category">
-    <div><label>Новая категория</label>
-      <input type="text" name="category_name" placeholder="например: Свет · Вода · Аренда склада · Канцелярия"></div>
-    <div style="flex:0"><button type="submit" class="secondary">Добавить</button></div>
-  </form>
-  <?php if (empty($allCategories)): ?>
-    <p class="muted">Пока нет ни одной категории.</p>
-  <?php else: ?>
-    <table>
-      <tr><th>Название</th><th>Состояние</th><th></th></tr>
-      <?php foreach ($allCategories as $c): ?>
-        <tr<?= $c['active'] ? '' : ' class="muted"' ?>>
-          <td><?= htmlspecialchars($c['name']) ?></td>
-          <td><?= $c['active'] ? '<span class="badge badge-ok">используется</span>' : '<span class="badge badge-neutral">скрыта</span>' ?></td>
-          <td>
-            <form method="post" style="display:inline">
-              <?= csrf_field() ?>
-              <input type="hidden" name="action" value="toggle_category">
-              <input type="hidden" name="category_id" value="<?= (int)$c['rowid'] ?>">
-              <?php if ($c['active']): ?>
-                <button type="submit" class="secondary small">Скрыть</button>
-              <?php else: ?>
-                <input type="hidden" name="make_active" value="1">
-                <button type="submit" class="secondary small">Вернуть</button>
-              <?php endif; ?>
-            </form>
-          </td>
-        </tr>
-      <?php endforeach; ?>
-    </table>
-    <p class="muted" style="margin-top:8px">Скрытая категория пропадает из выбора при записи расхода,
-    но прошлые расходы по ней остаются в отчёте.</p>
-  <?php endif; ?>
+  <p class="muted">Список категорий теперь общий для всех справочников — он живёт в разделе
+  <a href="expense_categories.php">Справочники → Категории хозрасходов</a>. Там же их можно
+  переименовать или скрыть.</p>
+  <p class="muted">Сейчас заведено: <strong><?= count($allCategories) ?></strong>,
+  из них показывается при вводе: <strong><?= count($categories) ?></strong>.</p>
 </div>
 
 <script>

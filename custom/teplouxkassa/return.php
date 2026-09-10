@@ -9,6 +9,7 @@
  *    без изменений, для случаев, когда исходного счёта нет/не важно (клиент без документа и т.п.).
  */
 require_once __DIR__ . '/includes/auth.php';
+require_once __DIR__ . '/includes/named_lock.php';   // H1 — защита от двойного возврата
 require_once __DIR__ . '/includes/dolibarr_direct.php'; // get_invoice_line_warehouses()
 
 /**
@@ -102,6 +103,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif (!$sourceInvoiceId) {
             $message = 'Счёт не выбран.';
             $messageType = 'err';
+        } elseif (!acquire_named_lock('kassa_return_invoice_' . $sourceInvoiceId)) {
+            // H1 (финансовый аудит 05.09.2026): два почти одновременных возврата по ОДНОМУ счёту
+            // проходили оба — живой тест дал овер-возврат в 3 попытках из 6 (продано 10 шт., вернулось
+            // 12 шт.). Пересчёт «сколько уже возвращено» ниже сам по себе гонку не ловит: оба запроса
+            // успевают прочитать одно и то же состояние до того, как хоть один запишет документ.
+            // Блокировка — по ИСХОДНОМУ СЧЁТУ, возвраты по разным счетам по-прежнему параллельны;
+            // держится до конца запроса (см. includes/named_lock.php).
+            $message = 'По этому счёту прямо сейчас оформляется другой возврат — подождите несколько секунд и повторите.';
+            $messageType = 'err';
         } else {
             // Перепроверяем счёт ЗАНОВО на сервере — не доверяем ценам/суммам из формы, только тому,
             // какие строки кассир отметил и сколько поправил (checkbox/qty/склад).
@@ -157,7 +167,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $message = 'Отметьте хотя бы одну позицию для возврата.';
                     $messageType = 'err';
                 } else {
-                    $creditNoteId = $api->createCreditNote((int)$_SESSION['return_client']['id'], $sourceInvoiceId);
+                    $creditNoteId = $api->createCreditNote((int)$_SESSION['return_client']['id'], $sourceInvoiceId, 'return');
                     if (!$creditNoteId) {
                         $message = 'Ошибка создания возврата: ' . $api->lastError;
                         $messageType = 'err';
@@ -195,6 +205,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $messageType = $stockWarnings ? 'err' : 'ok';
                                 $_SESSION['return_client'] = null;
                                 $_SESSION['return_source_invoice_id'] = null;
+                                $_SESSION['last_return'] = ['invoice_id' => (int)$creditNoteId, 'time' => time()];
                                 flash_set($message, $messageType);
                                 header('Location: return.php');
                                 exit;
@@ -223,7 +234,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = 'Укажите причину возврата без счёта — коротко, но по делу (например: «брак, чек потерян» или «привезли не тот товар, продажа была в июле»). Она сохранится в документе возврата.';
             $messageType = 'err';
         } else {
-            $creditNoteId = $api->createCreditNote((int)$_SESSION['return_client']['id']);
+            $creditNoteId = $api->createCreditNote((int)$_SESSION['return_client']['id'], null, 'return');
             if (!$creditNoteId) {
                 $message = 'Ошибка создания возврата: ' . $api->lastError;
                 $messageType = 'err';
@@ -271,6 +282,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $_SESSION['return_client'] = null;
                         // Документ уже реальный — редирект (POST → GET), чтобы обновление страницы
                         // (F5) не повторило отправку формы и не создало второй возврат.
+                        $_SESSION['last_return'] = ['invoice_id' => (int)$creditNoteId, 'time' => time()];
                         flash_set($message, $messageType);
                         header('Location: return.php');
                         exit;
@@ -340,6 +352,20 @@ require __DIR__ . '/includes/layout_top.php';
   </form>
 <?php endif; ?>
 <?php if ($message): ?><p class="<?= $messageType ?>"><?= nl2br(htmlspecialchars($message)) ?></p><?php endif; ?>
+<?php
+  // Документ возврата в Excel (замечание Жамшида, 07.09.2026). Тот же invoice_excel.php, что и у
+  // накладной, — он сам подписывает кредит-ноту как «Возврат №…». Ссылка живёт, пока не оформлен
+  // следующий возврат, а не только внутри одноразового сообщения.
+  $lastReturnId = (int)($_SESSION['last_return']['invoice_id'] ?? 0);
+?>
+<?php if ($lastReturnId): ?>
+  <p>
+    <a class="btn secondary" href="invoice_excel.php?id=<?= $lastReturnId ?>">📄 Скачать документ возврата (Excel)</a>
+    <?php if (!$message): ?>
+      <span class="muted">— последний оформленный возврат, документ #<?= $lastReturnId ?></span>
+    <?php endif; ?>
+  </p>
+<?php endif; ?>
 
 <div class="card">
   <h2>Клиент</h2>

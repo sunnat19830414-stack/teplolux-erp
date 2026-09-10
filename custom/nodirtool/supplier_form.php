@@ -12,6 +12,7 @@
  * то есть «кому писать» жило в личном ящике закупщика.
  */
 require_once __DIR__ . '/includes/auth.php';
+require_once __DIR__ . '/includes/payment_terms.php';   // срок оплаты (B7, 05.09.2026)
 
 const SUPPLIER_FORM_CONTEXTS = [
     'payments'  => ['page' => 'payments.php',  'field' => 'pay_supplier'],
@@ -37,6 +38,7 @@ $fields = [
     'country_id' => COUNTRY_UZBEKISTAN, 'multicurrency_code' => '',
 ];
 $contactPerson = '';
+$leadTime = '';
 // Реквизиты для спецификации (B1): номер контракта, с какого номера продолжать нумерацию
 // спецификаций у этого поставщика, и как писать страну происхождения в самом документе.
 $contractNumber = '';
@@ -63,7 +65,16 @@ if ($isEdit && $_SERVER['REQUEST_METHOD'] !== 'POST') {
     $contractNumber = (string)($opts['options_contract_number'] ?? '');
     $specLastNumber = (string)($opts['options_spec_last_number'] ?? '');
     $originText = (string)($opts['options_origin_text'] ?? '');
+    $leadTime = (string)($opts['options_lead_time_days'] ?? '');
+    // Срок оплаты (B7, 05.09.2026) — родное поле Dolibarr, а не наше доп.поле.
+    $paymentTermId = (int)($existing['cond_reglement_supplier_id'] ?? 0);
+    // Предоплата/постоплата (R4 отчёта «Пробелы NodirTool»): признак показывался бейджем, но
+    // формы для правки не было — он был проставлен разом всем 52 поставщикам и застыл. От него
+    // зависит, по какому количеству выставляется счёт (заказанному или принятому), то есть деньги.
+    $payWhen = (string)($opts['options_payment_terms'] ?? '');
 }
+$paymentTermId = $paymentTermId ?? 0;
+$payWhen = $payWhen ?? '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $fields['name'] = trim($_POST['name'] ?? '');
@@ -78,12 +89,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $contractNumber = trim($_POST['contract_number'] ?? '');
     $specLastNumber = trim($_POST['spec_last_number'] ?? '');
     $originText = trim($_POST['origin_text'] ?? '');
+    $leadTime = trim($_POST['lead_time_days'] ?? '');
+    $paymentTermId = (int)($_POST['payment_term_id'] ?? 0);
+    $payWhen = in_array($_POST['payment_when'] ?? '', ['prepay', 'postpay'], true) ? $_POST['payment_when'] : '';
+
+    // Условие оплаты — обычное поле контрагента, идёт тем же PUT/POST (проверено: сохраняется).
+    $fields['cond_reglement_supplier_id'] = $paymentTermId ?: null;
 
     $payload = $fields + ['array_options' => [
         'options_contact_person' => $contactPerson,
         'options_contract_number' => $contractNumber,
         'options_spec_last_number' => $specLastNumber === '' ? null : (int)$specLastNumber,
         'options_origin_text' => $originText,
+        'options_payment_terms' => $payWhen,
+        'options_lead_time_days' => $leadTime === '' ? null : (int)$leadTime,
     ]];
 
     if ($fields['name'] === '') {
@@ -177,6 +196,32 @@ require __DIR__ . '/includes/layout_top.php';
 
     <label>Номер контракта</label>
     <input type="text" name="contract_number" value="<?= htmlspecialchars($contractNumber) ?>" placeholder="например 04">
+
+    <label>Типичный срок поставки, дней</label>
+    <input type="number" name="lead_time_days" min="0" max="365" value="<?= htmlspecialchars($leadTime) ?>"
+           placeholder="например 45">
+    <p class="muted" style="margin:-6px 0 12px">Сколько обычно проходит от заказа до прихода на склад.
+    Нужен, чтобы «Что пора закупать» подсказывало заказ заранее, а не в день, когда товар кончился.
+    Пока заполняется по памяти — дальше начнёт считаться сам по датам заказов и приёмок.</p>
+
+    <label>Когда платим</label>
+    <select name="payment_when">
+      <option value="" <?= $payWhen === '' ? 'selected' : '' ?>>— не задано —</option>
+      <option value="prepay"  <?= $payWhen === 'prepay'  ? 'selected' : '' ?>>Предоплата 100% — платим до отгрузки</option>
+      <option value="postpay" <?= $payWhen === 'postpay' ? 'selected' : '' ?>>Постоплата — товар сначала, оплата потом</option>
+    </select>
+    <p class="muted" style="margin-top:-4px">От этого зависит, по какому количеству выставляется счёт:
+    при предоплате — по заказанному (деньги ушли вперёд), при постоплате — по реально принятому.</p>
+
+    <label>Срок оплаты по договору</label>
+    <select name="payment_term_id">
+      <option value="0">— не задан —</option>
+      <?php foreach (payment_terms_list() as $tid => $t): ?>
+        <option value="<?= (int)$tid ?>" <?= $paymentTermId === (int)$tid ? 'selected' : '' ?>><?= htmlspecialchars($t['label']) ?></option>
+      <?php endforeach; ?>
+    </select>
+    <p class="muted" style="margin-top:-4px">Подставится в каждый счёт этого поставщика — будет видно,
+    до какой даты платить. Тем, кто работает по предоплате, заполнять не нужно.</p>
 
     <label>Последний номер спецификации <span class="muted">(нумерация продолжится со следующего)</span></label>
     <input type="number" name="spec_last_number" value="<?= htmlspecialchars($specLastNumber) ?>" step="1" min="0" placeholder="например 30">

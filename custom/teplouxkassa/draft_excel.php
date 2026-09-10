@@ -1,5 +1,12 @@
 <?php
 /**
+ * ⚠️ В документах, которые уходят клиенту, символ валюты НЕ показываем (решение 10.09.2026).
+ * Причина деловая, а не оформительская: в Узбекистане запрещена розничная торговля в валюте.
+ * Документ без символа читается как сумма в сумах; документ со знаком доллара — это готовое
+ * доказательство обратного. На внутренних экранах (sale.php, return.php и т.п.) знак остаётся,
+ * там он нужен продавцу. Не возвращать сюда «$», «USD» и подобное.
+ */
+/**
  * Выгрузка черновика продажи в Excel — доступна в любой момент, независимо от статуса (открыт/
  * переведён в продажу/отменён), не требует закрытия документа.
  */
@@ -62,7 +69,7 @@ xls_send_headers('Draft_' . $safeRef . '.xls', 'Черновик_' . $safeRef . 
    <Row><?= xls_cell_str('Label', 'Статус:') ?><?= xls_cell_str($draft['status'] === 'open' ? 'Plain' : ($draft['status'] === 'converted' ? 'PaidYes' : 'PaidNo'), $statusLabel, 3) ?></Row>
    <Row/>
    <Row>
-    <?= xls_cell_str('Header', '№') ?><?= xls_cell_str('Header', 'Наименование') ?><?= xls_cell_str('Header', 'Артикул') ?><?= xls_cell_str('Header', 'Кол-во') ?><?= xls_cell_str('Header', 'Сумма, $') ?>
+    <?= xls_cell_str('Header', '№') ?><?= xls_cell_str('Header', 'Наименование') ?><?= xls_cell_str('Header', 'Артикул') ?><?= xls_cell_str('Header', 'Кол-во') ?><?= xls_cell_str('Header', 'Сумма') ?>
    </Row>
    <?php foreach ($draft['items'] as $i => $item):
        $lineTotal = ($item['price'] ?? 0) * ($item['qty'] ?? 0) * $vatMult;

@@ -82,7 +82,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($mode === 'custom' && $comment === '') {
             $message = 'Укажите причину выдачи — это обязательно, если она не привязана к конкретной переплате.';
             $messageType = 'err';
-        } elseif ($mode === 'custom' && payout_get_open_credit_notes($api, $socId)) {
+        } elseif ($mode === 'custom' && ($blockers = payout_get_open_credit_notes($api, $socId))) {
             // BUG-K4 (внешний отчёт, 02.09.2026): "другая сумма" заводит НОВУЮ, не связанную с
             // остальными кредит-ноту и сразу её закрывает — а уже СУЩЕСТВУЮЩИЕ незакрытые кредит-ноты
             // клиента (реальная переплата, задокументированная раньше) при этом не трогаются вообще.
@@ -91,14 +91,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // переплаты. Теперь, пока у клиента есть хоть одна незакрытая кредит-нота, "другая сумма"
             // заблокирована — сначала закрыть их через "Выбрать" в таблице выше, только когда реальных
             // задокументированных переплат не осталось, "другая сумма" снова доступна.
-            $message = 'У клиента уже есть незакрытая переплата (кредит-нота/аванс) — сначала закройте её через кнопку «Выбрать» в таблице выше, «Другая сумма» пока заблокирована, чтобы не выдать одну и ту же переплату дважды.';
+            // M5 (финансовый аудит 05.09.2026): сам запрет оставлен как есть — он и защищает от
+            // двойной выдачи. Убрано другое: раньше отказ не говорил, ЧТО именно мешает, и кассиру
+            // приходилось искать это глазами. Теперь документы названы прямо в отказе.
+            $blockList = [];
+            foreach ($blockers as $b) {
+                $blockList[] = ($b['ref'] ?? ('#' . ($b['id'] ?? '?')))
+                             . ' на ' . number_format((float)($b['amount'] ?? 0), 2, '.', ' ') . ' $';
+            }
+            $message = 'Сначала закройте кнопкой «Выбрать» в таблице выше: ' . implode(', ', $blockList)
+                     . '. Пока они открыты, «Другая сумма» заблокирована — иначе одну и ту же переплату'
+                     . ' можно выдать дважды.';
             $messageType = 'err';
         } elseif ($mode === 'existing' && !$creditNoteId) {
             $message = 'Выберите переплату, которую закрываете.';
             $messageType = 'err';
         } else {
+            /**
+             * C2 (финансовый аудит 05.09.2026): два почти одновременных запроса на выдачу проходили
+             * ОБА и списывали деньги дважды — живой тест дал задвоение в 3 попытках из 4. Причина не
+             * в узком окне: setInvoicePaid() у Dolibarr ИДЕМПОТЕНТЕН — повторный вызов на уже
+             * закрытый документ тоже отвечает «успех», поэтому проверка «документ ещё открыт» гонку
+             * не ловит вовсе. Случай не гипотетический: у направления один пароль, кассир работает
+             * с двух вкладок или двух устройств.
+             *
+             * Блокировка — по КЛИЕНТУ: выдачи разным клиентам по-прежнему параллельны, а связка
+             * «перепроверил → закрыл → списал» по одному клиенту выполняется строго по очереди.
+             */
+            require_once __DIR__ . '/includes/named_lock.php';
+            $lockResult = with_named_lock('kassa_payout_client_' . $socId, function () use (
+                $api, $cfg, $socId, $mode, $creditNoteId, $comment, $total, $paySplit, $payDetail
+            ) {
+            $message = '';
+            $messageType = '';
             $refForReceipt = 'Выдача денег';
             $ok = true;
+
+            // Повторная проверка ВНУТРИ блокировки: между отрисовкой формы и этим моментом другой
+            // запрос мог закрыть переплату — тогда решение о «другой сумме» было принято по устаревшим данным.
+            if ($mode === 'custom' && payout_get_open_credit_notes($api, $socId)) {
+                return ['ok' => false, 'type' => 'err',
+                        'message' => 'У клиента уже есть незакрытая переплата — сначала закройте её через «Выбрать».'];
+            }
 
             if ($mode === 'existing') {
                 // Перепроверяем документ ЗАНОВО на сервере — не доверяем сумме, посчитанной при
@@ -127,7 +161,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($ok) {
                 $noteIdToClose = $creditNoteId;
                 if ($mode === 'custom') {
-                    $noteIdToClose = $api->createCreditNote($socId);
+                    $noteIdToClose = $api->createCreditNote($socId, null, 'payout');
                     if (!$noteIdToClose) {
                         $message = 'Ошибка создания документа: ' . $api->lastError;
                         $messageType = 'err';
@@ -151,46 +185,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 }
 
-                if ($ok) {
-                    $closeOk = $api->setInvoicePaid($noteIdToClose);
-                    if (!$closeOk) {
-                        $message = 'Не удалось закрыть документ (' . $api->lastError . ') — деньги НЕ списаны, повторите.';
-                        $messageType = 'err';
-                    } else {
-                        $moneyErrors = postPayoutMoney($api, $cfg, $payDetail, 'Выдача денег клиенту, касса ' . $cfg['direction_label'] . ($comment !== '' ? ' — ' . $comment : ''));
-                        $paidLabels = [];
-                        foreach ($paySplit as $key => $amt) {
-                            $paidLabels[] = paySplitLabel($cfg['payment_accounts'][$key]['label'], $payDetail[$key]);
-                        }
-                        $message = "Готово! Выдано клиенту: " . implode(' + ', $paidLabels) . ".";
-                        if ($moneyErrors) {
-                            $message .= "\nВНИМАНИЕ: часть суммы не удалось списать со счёта: " . implode('; ', $moneyErrors) . " — переплата клиента уже закрыта, поправьте остаток кассы вручную.";
-                        }
-                        $messageType = $moneyErrors ? 'err' : 'ok';
+                if (!$ok) return ['ok' => false, 'message' => $message, 'type' => $messageType];
 
-                        $receiptItems = [];
-                        foreach ($paySplit as $key => $amt) {
-                            $receiptItems[] = ['ref' => $refForReceipt, 'method' => $cfg['payment_accounts'][$key]['label'], 'amount' => $amt, 'uzs' => $payDetail[$key]['uzs'], 'rate' => $payDetail[$key]['rate']];
-                        }
-                        $_SESSION['last_receipt'] = [
-                            'type' => 'out',
-                            'client_name' => $_SESSION['payout_client']['name'] ?? '',
-                            'items' => $receiptItems,
-                            'total' => $total,
-                            'date' => time(),
-                        ];
-                        $showReceiptLink = true;
-                        $_SESSION['payout_client'] = null;
-                        // Документ уже реальный (и деньги уже списаны) — редирект (POST → GET), чтобы
-                        // F5 не повторил отправку формы. Особенно важно для режима "другая сумма" —
-                        // там, в отличие от "закрыть существующую переплату", повторная отправка не
-                        // отбилась бы автоматически (создала бы ещё одну кредит-ноту и списала деньги
-                        // повторно).
-                        flash_set($message, $messageType, ['show_receipt_link' => true]);
-                        header('Location: payout.php');
-                        exit;
-                    }
+                $closeOk = $api->setInvoicePaid($noteIdToClose);
+                if (!$closeOk) {
+                    return ['ok' => false, 'type' => 'err',
+                            'message' => 'Не удалось закрыть документ (' . $api->lastError . ') — деньги НЕ списаны, повторите.'];
                 }
+
+                $moneyErrors = postPayoutMoney($api, $cfg, $payDetail, 'Выдача денег клиенту, касса ' . $cfg['direction_label'] . ($comment !== '' ? ' — ' . $comment : ''));
+                $paidLabels = [];
+                foreach ($paySplit as $key => $amt) {
+                    $paidLabels[] = paySplitLabel($cfg['payment_accounts'][$key]['label'], $payDetail[$key]);
+                }
+                $msg = "Готово! Выдано клиенту: " . implode(' + ', $paidLabels) . ".";
+                if ($moneyErrors) {
+                    $msg .= "\nВНИМАНИЕ: часть суммы не удалось списать со счёта: " . implode('; ', $moneyErrors) . " — переплата клиента уже закрыта, поправьте остаток кассы вручную.";
+                }
+
+                $receiptItems = [];
+                foreach ($paySplit as $key => $amt) {
+                    $receiptItems[] = ['ref' => $refForReceipt, 'method' => $cfg['payment_accounts'][$key]['label'], 'amount' => $amt, 'uzs' => $payDetail[$key]['uzs'], 'rate' => $payDetail[$key]['rate']];
+                }
+                return ['ok' => true, 'message' => $msg, 'type' => $moneyErrors ? 'err' : 'ok',
+                        'receipt_items' => $receiptItems];
+            }
+            });
+
+            // Результат применяем УЖЕ ВНЕ блокировки — она держится ровно на время денег.
+            $message = $lockResult['message'] ?? ($lockResult['error'] ?? 'Не удалось выполнить выдачу.');
+            $messageType = $lockResult['type'] ?? 'err';
+            if (!empty($lockResult['ok'])) {
+                $_SESSION['last_receipt'] = [
+                    'type' => 'out',
+                    'client_name' => $_SESSION['payout_client']['name'] ?? '',
+                    'items' => $lockResult['receipt_items'],
+                    'total' => $total,
+                    'date' => time(),
+                ];
+                $showReceiptLink = true;
+                $_SESSION['payout_client'] = null;
+                // Документ уже реальный (и деньги уже списаны) — редирект (POST → GET), чтобы F5 не
+                // повторил отправку формы.
+                flash_set($message, $messageType, ['show_receipt_link' => true]);
+                header('Location: payout.php');
+                exit;
             }
         }
     }
@@ -328,6 +367,21 @@ require __DIR__ . '/includes/layout_top.php';
 <?php endif; ?>
 
 <script>
+// ⚠️ Выбор клиента объявляем ПЕРВЫМ делом. Раньше он стоял в конце скрипта, а выше него шёл
+// document.getElementById('payoutForm').addEventListener(...) — на стартовой странице формы ещё
+// нет (клиент не выбран), обращение к null роняло весь скрипт, и onClientPick не создавался.
+// Внешне это выглядело как «выдача денег не работает»: клик по клиенту в поиске не делал ничего.
+// Замечание Жамшида, 07.09.2026.
+window.onClientPick = function (c) {
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.innerHTML = '<input type="hidden" name="_csrf" value="<?= csrf_token() ?>">' + '<input type="hidden" name="action" value="select_client">' +
+    '<input type="hidden" name="client_id" value="' + c.id + '">' +
+    '<input type="hidden" name="client_name" value="' + c.name.replace(/"/g, '&quot;') + '">';
+  document.body.appendChild(form);
+  form.submit();
+};
+
 function selectCreditNote(id, amount, ref) {
   document.getElementById('f_mode').value = 'existing';
   document.getElementById('f_credit_note_id').value = id;
@@ -356,7 +410,8 @@ function payoutAmountAboutToPay() {
   return sum;
 }
 
-document.getElementById('payoutForm').addEventListener('submit', function (e) {
+const payoutFormEl = document.getElementById('payoutForm');
+if (payoutFormEl) payoutFormEl.addEventListener('submit', function (e) {
   const form = this;
   // Та же двухпроходная схема, что и в appConfirmSubmit() (assets/confirm-modal.js) — не пользуемся
   // ей напрямую здесь, т.к. нужен ДИНАМИЧЕСКИЙ текст подтверждения (точные цифры долга), а не
@@ -381,15 +436,6 @@ document.getElementById('payoutForm').addEventListener('submit', function (e) {
   });
 });
 
-window.onClientPick = function (c) {
-  const form = document.createElement('form');
-  form.method = 'post';
-  form.innerHTML = '<input type="hidden" name="_csrf" value="<?= csrf_token() ?>">' + '<input type="hidden" name="action" value="select_client">' +
-    '<input type="hidden" name="client_id" value="' + c.id + '">' +
-    '<input type="hidden" name="client_name" value="' + c.name.replace(/"/g, '&quot;') + '">';
-  document.body.appendChild(form);
-  form.submit();
-};
 
 document.querySelectorAll('.pay-uzs-input').forEach(uzsInput => {
   const key = uzsInput.dataset.key;

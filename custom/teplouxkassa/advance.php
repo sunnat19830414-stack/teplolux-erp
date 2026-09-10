@@ -48,7 +48,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $messageType = 'err';
         } else {
             $socId = (int)$_SESSION['advance_client']['id'];
-            $noteId = $api->createCreditNote($socId);
+            $noteId = $api->createCreditNote($socId, null, 'advance');
             if (!$noteId) {
                 $message = 'Ошибка создания документа аванса: ' . $api->lastError;
                 $messageType = 'err';

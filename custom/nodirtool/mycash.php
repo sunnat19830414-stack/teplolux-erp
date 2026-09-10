@@ -10,6 +10,11 @@ require_once __DIR__ . '/includes/mycash.php';
 
 $myAcc = $cfg['personal_cash_accounts'][$_SESSION['user']['login']] ?? null;
 
+// Валюта личной кассы — из самой карточки счёта, не угадывается по названию (05.09.2026).
+// Определяется ДО обработки POST: сообщения об ошибках там уже показывают суммы.
+require_once __DIR__ . '/includes/currency.php';
+$accountCurrency = $myAcc ? account_currency((int)$myAcc['id']) : 'USD';
+
 $message = '';
 $messageType = '';
 
@@ -52,22 +57,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $myAcc) {
             $message = 'Укажите сумму передачи.';
             $messageType = 'err';
         } elseif ($currentBalance !== null && $amount > $currentBalance + 0.001) {
-            $message = 'В кассе только ' . number_format((float)$currentBalance, 2) . ' $ — передать больше нельзя.';
+            $message = 'В кассе только ' . money((float)$currentBalance, $accountCurrency) . ' — передать больше нельзя.';
             $messageType = 'err';
         } else {
+            // LOW-пункт финансового аудита (05.09.2026): списание и зачисление одной транзакцией —
+            // при сбое второй проводки первая откатывается сама, деньги больше не могут уйти
+            // «в никуда». Остаток перепроверяется под блокировкой, поэтому два одновременных
+            // нажатия не передадут одни и те же деньги дважды.
+            require_once __DIR__ . '/includes/bank_transfer.php';
             $label = 'Передача шефу (Умид) — от: ' . $who;
-            $outRes = $api->addBankLine((int)$myAcc['id'], $label, -1 * $amount, 'LIQ');
-            if ($outRes === null) {
-                $message = 'Не удалось списать с вашей кассы: ' . $api->lastError . ' — передача не записана.';
+            $tr = bank_transfer([
+                'from_account' => (int)$myAcc['id'],
+                'to_account'   => (int)$bossAcc['id'],
+                'amount'       => $amount,
+                'out_label'    => $label,
+                'in_label'     => 'Принято от: ' . $who,
+                'type'         => 'LIQ',
+                'user_id'      => LOGISTICS_API_USER_ID,
+            ]);
+            if (empty($tr['ok'])) {
+                $message = 'Передача не выполнена: ' . $tr['error'];
                 $messageType = 'err';
             } else {
-                $inRes = $api->addBankLine((int)$bossAcc['id'], 'Принято от: ' . $who, $amount, 'LIQ');
-                $msg = 'Передано шефу: ' . number_format($amount, 2) . ' $.';
-                if ($inRes === null) {
-                    $msg .= ' ВНИМАНИЕ: с вашей кассы списано, но на кассу шефа НЕ зачислено ('
-                        . $api->lastError . ') — сообщите Суннату, поправим вручную.';
-                }
-                flash_set($msg, $inRes === null ? 'err' : 'ok');
+                flash_set('Передано шефу: ' . money($tr['amount'], $accountCurrency) . '.', 'ok');
                 header('Location: mycash.php');
                 exit;
             }
@@ -110,7 +122,7 @@ require __DIR__ . '/includes/layout_top.php';
   <div class="row" style="align-items:center">
     <div>
       <h2 style="margin:0"><?= htmlspecialchars($myAcc['label']) ?></h2>
-      <div style="font-size:28px; font-weight:700"><?= $balance !== null ? number_format($balance, 2) . ' $' : '?' ?></div>
+      <div style="font-size:28px; font-weight:700"><?= $balance !== null ? htmlspecialchars(money($balance, $accountCurrency)) : '?' ?></div>
     </div>
     <?php // Передача остатка шефу (04.09.2026) — деньги у вас копятся, а потом уходят Умиду. ?>
     <?php if (!empty($cfg['boss_cash_account']) && $balance !== null && $balance > 0.01): ?>
@@ -143,7 +155,7 @@ require __DIR__ . '/includes/layout_top.php';
       ?>
         <tr>
           <td><?= $l['dateo'] ? date('d.m.Y', (int)$l['dateo']) : '' ?></td>
-          <td class="<?= $amount >= 0 ? 'ok' : 'err' ?>"><?= ($amount >= 0 ? '+' : '') . number_format($amount, 2) ?> $</td>
+          <td class="<?= $amount >= 0 ? 'ok' : 'err' ?>"><?= ($amount >= 0 ? '+' : '') . htmlspecialchars(money($amount, $accountCurrency)) ?></td>
           <td><?= htmlspecialchars($l['label'] ?? '') ?></td>
           <td>
             <?php if ($amount > 0): ?>

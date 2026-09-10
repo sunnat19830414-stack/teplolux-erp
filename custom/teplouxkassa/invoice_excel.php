@@ -1,5 +1,12 @@
 <?php
 /**
+ * ⚠️ В документах, которые уходят клиенту, символ валюты НЕ показываем (решение 10.09.2026).
+ * Причина деловая, а не оформительская: в Узбекистане запрещена розничная торговля в валюте.
+ * Документ без символа читается как сумма в сумах; документ со знаком доллара — это готовое
+ * доказательство обратного. На внутренних экранах (sale.php, return.php и т.п.) знак остаётся,
+ * там он нужен продавцу. Не возвращать сюда «$», «USD» и подобное.
+ */
+/**
  * Выгрузка накладной (счёта Dolibarr) в Excel — чтобы сотрудник мог распечатать и отдать/отправить
  * клиенту.
  */
@@ -81,7 +88,7 @@ xls_send_headers(
     <?php if ($isPaid): ?>
       <?= xls_cell_str('PaidYes', 'ОПЛАЧЕНО', 3) ?>
     <?php elseif ($remainToPay < $totalTtc - 0.01): ?>
-      <?= xls_cell_str('PaidNo', 'ОПЛАЧЕНО ЧАСТИЧНО — остаток ' . number_format($remainToPay, 2, '.', '') . ' $', 3) ?>
+      <?= xls_cell_str('PaidNo', 'ОПЛАЧЕНО ЧАСТИЧНО — остаток ' . number_format($remainToPay, 2, '.', '') , 3) ?>
     <?php else: ?>
       <?= xls_cell_str('PaidNo', 'НЕ ОПЛАЧЕНО', 3) ?>
     <?php endif; ?>
@@ -89,12 +96,12 @@ xls_send_headers(
    <?php foreach ($payments as $p): ?>
    <Row>
     <?= xls_cell_str('Label', 'Оплата:') ?>
-    <?= xls_cell_str('Plain', payment_code_label((string)($p['type'] ?? '')) . ' — ' . number_format((float)($p['amount'] ?? 0), 2, '.', '') . ' $' . (!empty($p['date']) ? (' (' . date('d.m.Y', strtotime($p['date'])) . ')') : ''), 3) ?>
+    <?= xls_cell_str('Plain', payment_code_label((string)($p['type'] ?? '')) . ' — ' . number_format((float)($p['amount'] ?? 0), 2, '.', '')  . (!empty($p['date']) ? (' (' . date('d.m.Y', strtotime($p['date'])) . ')') : ''), 3) ?>
    </Row>
    <?php endforeach; ?>
    <Row/>
    <Row>
-    <?= xls_cell_str('Header', '№') ?><?= xls_cell_str('Header', 'Наименование') ?><?= xls_cell_str('Header', 'Артикул') ?><?= xls_cell_str('Header', 'Кол-во') ?><?= xls_cell_str('Header', 'Сумма, $') ?>
+    <?= xls_cell_str('Header', '№') ?><?= xls_cell_str('Header', 'Наименование') ?><?= xls_cell_str('Header', 'Артикул') ?><?= xls_cell_str('Header', 'Кол-во') ?><?= xls_cell_str('Header', 'Сумма') ?>
    </Row>
    <?php foreach (($inv['lines'] ?? []) as $i => $line): ?>
    <Row>

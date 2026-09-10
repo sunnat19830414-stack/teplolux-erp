@@ -49,6 +49,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                   $r['ok'] ? (!empty($r['warning']) ? 'warn' : 'ok') : 'err');
         header('Location: cash.php');
         exit;
+    } elseif ($action === 'delete_expense') {
+        $r = boss_delete_expense($api, (int)($_POST['expense_id'] ?? 0), $me['login']);
+        flash_set($r['ok'] ? ('Расход удалён.' . (!empty($r['note']) ? ' ' . $r['note'] : '')) : $r['error'],
+                  $r['ok'] ? 'ok' : 'err');
+        header('Location: cash.php');
+        exit;
     } elseif ($action === 'transfer') {
         $key = $_POST['target'] ?? '';
         $t = $targets[$key] ?? null;
@@ -80,6 +86,7 @@ if ($flash) { $message = $flash['message']; $messageType = $flash['type']; }
 $balance = $api->getAccountBalance($accId);
 $lines = array_reverse($api->getBankLines($accId));   // свежие сверху
 $categories = boss_expense_categories();
+$myExpenses = boss_my_expenses($me['login']);
 
 require __DIR__ . '/includes/layout_top.php';
 ?>
@@ -169,6 +176,36 @@ require __DIR__ . '/includes/layout_top.php';
     <?php if (count($lines) > 80): ?>
       <p class="muted">Показаны последние 80 из <?= count($lines) ?>.</p>
     <?php endif; ?>
+  <?php endif; ?>
+</div>
+
+<div class="card">
+  <h2>Мои расходы <span class="muted">— за последние 60 дней</span></h2>
+  <p class="muted">Здесь можно убрать ошибочную запись — деньги вернутся на счёт, с которого были
+    списаны. Чужие расходы удалять нельзя, как и ваши — никому другому.</p>
+  <?php if (empty($myExpenses)): ?>
+    <p class="muted">Расходов пока не было.</p>
+  <?php else: ?>
+    <table>
+      <tr><th>Дата</th><th>Вид</th><th class="num">Сумма</th><th>Комментарий</th><th></th></tr>
+      <?php foreach ($myExpenses as $e): ?>
+        <tr>
+          <td class="muted"><?= htmlspecialchars(date('d.m.Y', strtotime($e['expense_date']))) ?></td>
+          <td><?= htmlspecialchars($e['category_name'] ?? '') ?></td>
+          <td class="num"><?= number_format((float)$e['amount_usd'], 2, '.', ' ') ?> $</td>
+          <td class="muted"><?= htmlspecialchars($e['comment'] ?? '') ?></td>
+          <td>
+            <form method="post" style="display:inline"
+                  onsubmit="return appConfirmSubmit(this, 'Удалить этот расход? Деньги вернутся на счёт, с которого были списаны.');">
+              <?= csrf_field() ?>
+              <input type="hidden" name="action" value="delete_expense">
+              <input type="hidden" name="expense_id" value="<?= (int)$e['rowid'] ?>">
+              <button type="submit" class="secondary small">✕</button>
+            </form>
+          </td>
+        </tr>
+      <?php endforeach; ?>
+    </table>
   <?php endif; ?>
 </div>
 

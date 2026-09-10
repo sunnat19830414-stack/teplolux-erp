@@ -5,6 +5,9 @@
  * прямыми ссылками на КОНКРЕТНЫЕ заказы/поставщиков/перевозчиков (не просто число). См. CLAUDE.md.
  */
 require_once __DIR__ . '/includes/auth.php';
+require_once __DIR__ . '/includes/debt.php';   // долги по валютам (05.09.2026)
+require_once __DIR__ . '/includes/payment_terms.php'; // срок оплаты счетов (B7, 05.09.2026)
+require_once __DIR__ . '/includes/claims.php';        // открытые рекламации (B8, 05.09.2026)
 require_once __DIR__ . '/includes/logistics.php';
 require_once __DIR__ . '/includes/mycash.php';
 
@@ -33,11 +36,24 @@ $draftLikeGroups = [
     'validated' => ['statut' => 1, 'title' => 'Проведены',  'todo' => 'ждут вашего утверждения',      'orders' => []],
     'approved'  => ['statut' => 2, 'title' => 'Утверждены', 'todo' => 'осталось отправить поставщику', 'orders' => []],
 ];
+/**
+ * Сумма заказа В ЕГО ВАЛЮТЕ (05.09.2026): платить поставщику придётся именно в ней, поэтому
+ * доллары показывать нельзя. Добавляет к строке заказа ключи 'cur' и 'amount_native'.
+ */
+$withOrderCurrency = function (array $row): array {
+    $cur = strtoupper(trim((string)($row['multicurrency_code'] ?? ''))) ?: 'USD';
+    $row['cur'] = $cur;
+    $row['amount_native'] = $cur === 'USD'
+        ? (float)($row['total_ttc'] ?? 0)
+        : (float)($row['multicurrency_total_ttc'] ?? $row['total_ttc'] ?? 0);
+    return $row;
+};
+
 $draftLikeTotal = 0;
 foreach ($draftLikeGroups as $st => &$grp) {
-    $rows = $api->getSupplierOrdersByStatus($st, 'id,ref,socid,statut,total_ttc,date_commande');
+    $rows = $api->getSupplierOrdersByStatus($st, 'id,ref,socid,statut,total_ttc,date_commande,multicurrency_code,multicurrency_total_ttc');
     if (is_array($rows)) {
-        foreach ($rows as $row) { $grp['orders'][] = $row; $draftLikeTotal++; }
+        foreach ($rows as $row) { $grp['orders'][] = $withOrderCurrency($row); $draftLikeTotal++; }
     }
 }
 unset($grp);
@@ -67,38 +83,46 @@ usort($deliveryWarnings, fn($a, $b) => $a['days_left'] <=> $b['days_left']);
 $receivedNoInvoice = [];
 $invoicedRefs = $api->getInvoicedSupplierOrderRefs();
 foreach (['received_start', 'received_end'] as $st) {
-    $rows = $api->getSupplierOrdersByStatus($st, 'id,ref,socid,total_ttc');
+    $rows = $api->getSupplierOrdersByStatus($st, 'id,ref,socid,total_ttc,multicurrency_code,multicurrency_total_ttc');
     if (is_array($rows)) {
         foreach ($rows as $row) {
             if (!empty($invoicedRefs[$row['ref'] ?? ''])) continue;
-            $receivedNoInvoice[] = $row;
+            $receivedNoInvoice[] = $withOrderCurrency($row);
         }
     }
 }
 
 // --- 5. Неоплаченные счета поставщикам — поимённо ---
+// 05.09.2026: остаток — в валюте счёта (что реально надо заплатить). Одним запросом, без N+1:
+// раньше на КАЖДЫЙ счёт дёргался getSupplierInvoicePayments(), и суммы приходили в долларах.
 $unpaidInvoices = [];
-$rawInvoices = $api->getUnpaidSupplierInvoices();
-if (is_array($rawInvoices)) {
-    foreach ($rawInvoices as $inv) {
-        $paid = 0;
-        foreach ($api->getSupplierInvoicePayments((int)$inv['id']) as $p) { $paid += (float)($p['amount'] ?? 0); }
-        $remaining = (float)($inv['total_ttc'] ?? 0) - $paid;
-        if ($remaining > 0.01) {
-            $inv['remaining'] = $remaining;
-            $unpaidInvoices[] = $inv;
-        }
-    }
+foreach (supplier_unpaid_invoices() as $inv) {
+    if ((float)$inv['remaining_native'] <= 0.01) continue;
+    $unpaidInvoices[] = [
+        'id' => (int)$inv['rowid'],
+        'ref' => $inv['ref'],
+        'socid' => (int)$inv['fk_soc'],
+        'cur' => $inv['cur'],
+        'remaining' => (float)$inv['remaining_native'],
+        'remaining_usd' => (float)$inv['total_usd'] - ((float)$inv['total_native'] - (float)$inv['remaining_native']),
+    ];
 }
-usort($unpaidInvoices, fn($a, $b) => $b['remaining'] <=> $a['remaining']);
+// Сортировка по долларовому эквиваленту — разные валюты одним числом не сравнить.
+usort($unpaidInvoices, fn($a, $b) => $b['remaining_usd'] <=> $a['remaining_usd']);
+
+// --- 5б. Счета поставщикам, у которых подходит или прошёл срок оплаты (B7, 05.09.2026) ---
+$dueInvoices = overdue_supplier_invoices(3);
+
+// --- 5в. Открытые рекламации (B8, 05.09.2026) ---
+$openClaims = claims_list(true);
 
 // --- 6. Долги перевозчикам ---
-$carrierDebts = logistics_get_all_carrier_debts();
 $owedCarriers = [];
-foreach ($carrierDebts as $cid => $d) {
-    if ($d['debt'] > 0.01) $owedCarriers[$cid] = $d;
+foreach (carrier_debt_by_currency() as $cid => $byCur) {
+    $owe = array_filter($byCur, fn($v) => $v > 0.01);
+    if ($owe) $owedCarriers[$cid] = ['debt_by_currency' => $owe];
 }
-uasort($owedCarriers, fn($a, $b) => $b['debt'] <=> $a['debt']);
+uasort($owedCarriers, fn($a, $b) => debt_sort_key($b['debt_by_currency']) <=> debt_sort_key($a['debt_by_currency']));
 
 // --- Имена поставщиков/перевозчиков — batch-запросами (не в цикле, см. отчёт аудита P0#5) ---
 // N-3: заказы теперь сгруппированы по статусу — собираем socid из всех групп сразу (batch-запрос имён
@@ -112,6 +136,8 @@ $allSocIds = array_unique(array_merge(
     array_map(fn($r) => (int)$r['socid'], $deliveryWarnings),
     array_map(fn($r) => (int)$r['socid'], $receivedNoInvoice),
     array_map(fn($r) => (int)$r['socid'], $unpaidInvoices),
+    array_map(fn($r) => (int)$r['fk_soc'], $dueInvoices),   // счета с подошедшим сроком (B7)
+    array_map(fn($r) => (int)$r['fk_party'], $openClaims),  // контрагенты открытых рекламаций (B8)
     array_keys($owedCarriers)
 ));
 $namesById = $allSocIds ? $api->getThirdpartiesByIds($allSocIds) : [];
@@ -195,7 +221,7 @@ require __DIR__ . '/includes/layout_top.php';
                     // и зафиксировал). Общая функция — includes/auth.php. ?>
               <td><?= htmlspecialchars(nt_order_display_ref($o['ref'] ?? '', $o['statut'] ?? 0, (int)$o['id']) ?: "#{$o['id']}") ?></td>
               <td><?= htmlspecialchars($nameOf((int)$o['socid'])) ?></td>
-              <td><?= number_format((float)($o['total_ttc'] ?? 0), 2) ?> $</td>
+              <td><?= htmlspecialchars(money((float)$o['amount_native'], $o['cur'])) ?></td>
               <td><a href="order_view.php?id=<?= (int)$o['id'] ?>" class="btn secondary small">Открыть →</a></td>
             </tr>
           <?php endforeach; ?>
@@ -240,7 +266,7 @@ require __DIR__ . '/includes/layout_top.php';
         <tr>
           <td><?= htmlspecialchars($o['ref'] ?? "#{$o['id']}") ?></td>
           <td><?= htmlspecialchars($nameOf((int)$o['socid'])) ?></td>
-          <td><?= number_format((float)($o['total_ttc'] ?? 0), 2) ?> $</td>
+          <td><?= htmlspecialchars(money((float)$o['amount_native'], $o['cur'])) ?></td>
           <td><a href="payments.php?supplier_id=<?= (int)$o['socid'] ?>" class="btn secondary small">Оформить счёт →</a></td>
         </tr>
       <?php endforeach; ?>
@@ -259,8 +285,55 @@ require __DIR__ . '/includes/layout_top.php';
         <tr>
           <td><?= htmlspecialchars($inv['ref'] ?? '') ?></td>
           <td><?= htmlspecialchars($nameOf((int)$inv['socid'])) ?></td>
-          <td class="err"><?= number_format($inv['remaining'], 2) ?> $</td>
+          <td class="err"><?= htmlspecialchars(money($inv['remaining'], $inv['cur'])) ?></td>
           <td><a href="payments.php?supplier_id=<?= (int)$inv['socid'] ?>" class="btn secondary small">Оплатить →</a></td>
+        </tr>
+      <?php endforeach; ?>
+    </table>
+  <?php endif; ?>
+</div>
+
+<div class="card">
+  <h2>⏰ Срок оплаты подошёл</h2>
+  <?php if (empty($dueInvoices)): ?>
+    <p class="muted">Просроченных счетов нет.</p>
+  <?php else: ?>
+    <table>
+      <tr><th>Счёт</th><th>Поставщик</th><th>Оплатить до</th><th>Остаток</th><th></th></tr>
+      <?php foreach ($dueInvoices as $inv): ?>
+        <?php $dl = (int)$inv['days_left']; ?>
+        <tr>
+          <td><?= htmlspecialchars($inv['ref']) ?></td>
+          <td><?= htmlspecialchars($nameOf((int)$inv['fk_soc'])) ?></td>
+          <td class="<?= $dl < 0 ? 'err' : '' ?>">
+            <?= htmlspecialchars(date('d.m.Y', strtotime($inv['date_lim_reglement']))) ?>
+            <span class="muted"><?= $dl < 0 ? '· просрочен на ' . abs($dl) . ' дн.' : ($dl === 0 ? '· сегодня' : '· через ' . $dl . ' дн.') ?></span>
+          </td>
+          <td class="err"><?= htmlspecialchars(money((float)$inv['remaining_native'], $inv['cur'])) ?></td>
+          <td><a href="payments.php?supplier_id=<?= (int)$inv['fk_soc'] ?>" class="btn secondary small">Оплатить →</a></td>
+        </tr>
+      <?php endforeach; ?>
+    </table>
+  <?php endif; ?>
+</div>
+
+<div class="card">
+  <h2>⚠️ Рекламации без ответа</h2>
+  <?php if (empty($openClaims)): ?>
+    <p class="muted">Открытых претензий нет.</p>
+  <?php else: ?>
+    <table>
+      <tr><th>№</th><th>Кому</th><th>Что</th><th>Сумма</th><th>Ждём с</th><th></th></tr>
+      <?php foreach ($openClaims as $cl): ?>
+        <?php $waiting = (int)floor((time() - strtotime($cl['datec'])) / 86400); ?>
+        <tr>
+          <td>#<?= (int)$cl['rowid'] ?></td>
+          <td><?= htmlspecialchars($nameOf((int)$cl['fk_party'])) ?></td>
+          <td class="muted"><?= htmlspecialchars(mb_substr((string)$cl['product_label'] ?: (string)$cl['description'], 0, 40)) ?></td>
+          <td class="err"><?= htmlspecialchars(money((float)$cl['amount'], $cl['currency'])) ?></td>
+          <td class="muted"><?= htmlspecialchars(date('d.m.Y', strtotime($cl['datec']))) ?>
+            <?= $waiting > 0 ? '· ' . $waiting . ' дн.' : '' ?></td>
+          <td><a href="claims.php?id=<?= (int)$cl['rowid'] ?>" class="btn secondary small">Открыть →</a></td>
         </tr>
       <?php endforeach; ?>
     </table>
@@ -277,7 +350,7 @@ require __DIR__ . '/includes/layout_top.php';
       <?php foreach ($owedCarriers as $cid => $d): ?>
         <tr>
           <td><?= htmlspecialchars($nameOf($cid)) ?></td>
-          <td class="err"><?= number_format($d['debt'], 2) ?> $</td>
+          <td class="err"><?= htmlspecialchars(money_by_currency($d['debt_by_currency'])) ?></td>
           <td><a href="carriers.php?carrier_id=<?= (int)$cid ?>" class="btn secondary small">Оплатить →</a></td>
         </tr>
       <?php endforeach; ?>

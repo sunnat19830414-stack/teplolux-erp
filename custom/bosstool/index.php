@@ -17,6 +17,11 @@ $debts = report_client_debts($api, $dirs);
 $money = report_money($api, $cfg, $from, $to, $dirs);
 $purch = report_purchases($api, $from, $to);
 $supDebts = report_supplier_debts($api);
+// Долг поставщикам — по валютам (05.09.2026): складывать евро с долларами в одно число нельзя.
+$supDebtByCur = [];
+foreach ($supDebts as $byCur) {
+    foreach ($byCur as $cur => $sum) $supDebtByCur[$cur] = ($supDebtByCur[$cur] ?? 0) + $sum;
+}
 
 $myRequests = request_list($dirs, ['draft', 'sent', 'taken']);
 $lateTransit = array_values(array_filter($purch['transit_rows'],
@@ -36,7 +41,7 @@ require __DIR__ . '/includes/layout_top.php';
   <div class="kpi-grid">
     <div class="kpi"><div class="k">Продано за месяц</div><div class="v"><?= money($sales['net']) ?></div></div>
     <div class="kpi"><div class="k">Должны нам</div><div class="v neg"><?= money(array_sum($debts)) ?></div></div>
-    <div class="kpi"><div class="k">Должны мы</div><div class="v neg"><?= money(array_sum($supDebts)) ?></div></div>
+    <div class="kpi"><div class="k">Должны мы</div><div class="v neg"><?= htmlspecialchars(money_by_currency($supDebtByCur)) ?></div></div>
     <div class="kpi"><div class="k">Деньги: пришло − ушло</div>
       <?php // Только доллары — основная валюта компании. Смешивать их с сумами и евро в одной
             // цифре нельзя; полную картину по каждой валюте показывает отчёт «Пришло / ушло». ?>

@@ -151,23 +151,41 @@ function postCashOverage(DolibarrApi $api, array $cfg, array $leftoverByMethod, 
     return $errors;
 }
 
-function postUzsLedger(DolibarrApi $api, array $cfg, array $payDetail, string $comment): array
+/**
+ * Проводка в сумовый счёт по ОДНОМУ способу оплаты (H5 финансового аудита 05.09.2026).
+ *
+ * ⚠️ Зачем понадобилось поштучно. Раньше сумовые проводки делались одним пакетом ПОСЛЕ всего цикла
+ * оплат — и только если ни один способ не дал сбоя. Если в чеке два способа и второй упал (сбой
+ * сети или API в середине операции), получалось так: долг клиента уже уменьшен на сумму ПЕРВОГО,
+ * успешного способа, а сумовая проводка не делалась вообще — ни за один из них. Деньги, реально
+ * принятые кассиром, пропадали из учёта.
+ *
+ * Возвращает текст ошибки или null, если всё записалось.
+ */
+function postUzsLedgerOne(DolibarrApi $api, array $cfg, string $key, array $detail, string $comment): ?string
 {
+    if (($detail['uzs'] ?? null) === null) return null;   // способ в долларах — сюда не относится
+
     $uzsAccountId = $cfg['uzs_account_id'] ?? null;
     if (!$uzsAccountId) {
-        foreach ($payDetail as $detail) {
-            if ($detail['uzs'] !== null) return ['Сумовый счёт не настроен — реальная сумма в сумах никуда не записана.'];
-        }
-        return [];
+        return 'Сумовый счёт не настроен — реальная сумма в сумах никуда не записана.';
     }
+    $code = $cfg['payment_accounts'][$key]['code'] ?? 'VIR';
+    $res = $api->addBankLine((int)$uzsAccountId, $comment, $detail['uzs'], $code);
+    return $res === null ? "Сумовый счёт ({$key}): {$api->lastError}" : null;
+}
+
+/**
+ * То же самое сразу по всем способам. Оставлено для мест, где оплата идёт одним вызовом; там, где
+ * способы проводятся по очереди, правильнее звать postUzsLedgerOne() сразу за каждой успешной
+ * оплатой — см. докблок выше.
+ */
+function postUzsLedger(DolibarrApi $api, array $cfg, array $payDetail, string $comment): array
+{
     $errors = [];
     foreach ($payDetail as $key => $detail) {
-        if ($detail['uzs'] === null) continue; // способ в долларах (наличные) — сюда не относится
-        $code = $cfg['payment_accounts'][$key]['code'] ?? 'VIR';
-        $res = $api->addBankLine((int)$uzsAccountId, $comment, $detail['uzs'], $code);
-        if ($res === null) {
-            $errors[] = "Сумовый счёт ({$key}): {$api->lastError}";
-        }
+        $err = postUzsLedgerOne($api, $cfg, (string)$key, $detail, $comment);
+        if ($err !== null) $errors[] = $err;
     }
     return $errors;
 }

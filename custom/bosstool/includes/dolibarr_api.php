@@ -318,7 +318,7 @@ class DolibarrApi
     /** Счета поставщиков — для отчёта «кому должны». */
     public function getSupplierInvoices(string $status = ''): array
     {
-        $params = ['limit' => 2000, 'properties' => 'id,ref,ref_supplier,socid,statut,paye,total_ht,total_ttc,date'];
+        $params = ['limit' => 2000, 'properties' => 'id,ref,ref_supplier,socid,statut,paye,total_ht,total_ttc,date,multicurrency_code,multicurrency_total_ttc'];
         if ($status !== '') $params['status'] = $status;
         $r = $this->get('supplierinvoices?' . http_build_query($params));
         return is_array($r) ? $r : [];

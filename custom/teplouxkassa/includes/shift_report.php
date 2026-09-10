@@ -43,10 +43,21 @@ function build_shift_report(DolibarrApi $api, array $cfg, string $dateYmd): arra
                 $full = $api->getInvoice((int)$d['id']);
                 if (!is_array($full)) continue;
                 $lines = $full['lines'] ?? [];
+                // M1 (финансовый аудит 05.09.2026): вид берём из поля документа, а не из слов в
+                // описании строки. По тексту это ломалось на живом сценарии: кассир пишет в причине
+                // выдачи «Возврат аванса, внесённого ошибочно» — и выдача считалась авансом.
+                // Текстовое определение осталось ЗАПАСНЫМ — только для документов, созданных до
+                // появления поля (у них оно пустое), иначе история пересчиталась бы неверно.
+                $docKind = (string)($full['array_options']['options_doc_kind'] ?? '');
                 $isGenericLine = count($lines) === 1 && empty($lines[0]['fk_product'] ?? null);
                 $lineLabel = $isGenericLine ? (string)($lines[0]['label'] ?? $lines[0]['desc'] ?? '') : '';
-                $isAdvance = $isGenericLine && mb_stripos($lineLabel, 'аванс') !== false;
-                $isPayout = $isGenericLine && mb_stripos($lineLabel, 'выдача денег') !== false;
+                if ($docKind !== '') {
+                    $isAdvance = $docKind === 'advance';
+                    $isPayout  = $docKind === 'payout';
+                } else {
+                    $isAdvance = $isGenericLine && mb_stripos($lineLabel, 'аванс') !== false;
+                    $isPayout = $isGenericLine && mb_stripos($lineLabel, 'выдача денег') !== false;
+                }
                 if ($isAdvance) {
                     $adviceCount++;
                 } elseif ($isPayout) {

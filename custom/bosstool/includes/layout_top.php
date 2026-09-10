@@ -205,6 +205,7 @@
       <a href="cash.php" class="<?= $__page === 'cash.php' ? 'active' : '' ?>">Моя касса</a>
       <div class="nav-group-title">Отчёты</div>
       <a href="stock_prices.php" class="<?= $__page === 'stock_prices.php' ? 'active' : '' ?>">Склад: цены</a>
+      <a href="catalog.php" class="<?= in_array($__page, ['catalog.php', 'product_card.php'], true) ? 'active' : '' ?>">Каталог товаров</a>
       <a href="report_money.php" class="<?= $__page === 'report_money.php' ? 'active' : '' ?>">Пришло / ушло</a>
       <a href="report_sales.php" class="<?= $__page === 'report_sales.php' ? 'active' : '' ?>">Продажи и долги</a>
       <a href="report_purchases.php" class="<?= $__page === 'report_purchases.php' ? 'active' : '' ?>">Закупки и поставщики</a>

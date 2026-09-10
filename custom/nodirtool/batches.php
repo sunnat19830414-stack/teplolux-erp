@@ -156,7 +156,7 @@ $carrierNamesById = $carrierIdsInExpenses ? $api->getThirdpartiesByIds($carrierI
 require __DIR__ . '/includes/layout_top.php';
 ?>
 
-<h1>Партии / Логистика</h1>
+<h1>Партии и расходы</h1>
 <?php if ($selectedBatch): ?>
   <form method="post" style="margin-bottom:14px">
   <?= csrf_field() ?>
@@ -269,7 +269,7 @@ require __DIR__ . '/includes/layout_top.php';
       <div>
         <label>Вид расхода</label>
         <select name="expense_type">
-          <?php foreach (LOGISTICS_EXPENSE_TYPES as $key => $label): ?>
+          <?php foreach (logistics_expense_types() as $key => $label): ?>
             <option value="<?= $key ?>"><?= htmlspecialchars($label) ?></option>
           <?php endforeach; ?>
         </select>
@@ -317,7 +317,7 @@ require __DIR__ . '/includes/layout_top.php';
       <?php foreach ($expenses as $e): ?>
         <?php $carr = !empty($e['fk_carrier']) ? ($carrierNamesById[(int)$e['fk_carrier']] ?? null) : null; ?>
         <tr>
-          <td><?= htmlspecialchars(LOGISTICS_EXPENSE_TYPES[$e['expense_type']] ?? $e['expense_type']) ?></td>
+          <td><?= htmlspecialchars(logistics_expense_type_label($e['expense_type'])) ?></td>
           <td><?= number_format((float)$e['native_amount'], 2) ?> <?= htmlspecialchars($e['native_currency']) ?><?= $e['rate'] ? ' (курс ' . number_format((float)$e['rate'], 2) . ')' : '' ?></td>
           <td><?= number_format((float)$e['usd_amount'], 2) ?> $</td>
           <td class="muted"><?= $carr ? htmlspecialchars($carr['name'] ?? $carr['nom'] ?? '') : '—' ?></td>

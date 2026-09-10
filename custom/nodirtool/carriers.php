@@ -6,6 +6,8 @@
  */
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/logistics.php';
+require_once __DIR__ . '/includes/debt.php';   // долг перевозчику по валютам (05.09.2026)
+require_once __DIR__ . '/includes/shipments.php'; // рейсы этого перевозчика (B6, 05.09.2026)
 
 if (!array_key_exists('selected_carrier', $_SESSION)) $_SESSION['selected_carrier'] = null;
 
@@ -54,7 +56,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = 'Выберите счёт списания.';
             $messageType = 'err';
         } else {
-            $r = logistics_record_carrier_payment($carrierId, $amount, $acc['currency'], $rate, (int)$acc['id'], $who, $comment);
+            // К какому рейсу относится оплата — необязательно (можно платить «в общий долг»),
+            // но если указан, в акте сверки будет видно, за какой инвойс заплатили (B6, 05.09.2026).
+            $shipmentId = (int)($_POST['shipment_id'] ?? 0) ?: null;
+            $r = logistics_record_carrier_payment($carrierId, $amount, $acc['currency'], $rate, (int)$acc['id'], $who, $comment, $shipmentId);
             if (!($r['ok'] ?? false)) {
                 $message = $r['error'] ?? 'Ошибка оплаты.';
                 $messageType = 'err';
@@ -119,18 +124,20 @@ if ($flash) {
 // --- Дашборд "кому должны" — только когда перевозчик не выбран ---
 $owedCarriers = [];
 if (empty($_SESSION['selected_carrier'])) {
-    $debts = logistics_get_all_carrier_debts();
-    $ids = array_keys($debts);
+    // 05.09.2026: долг — в валюте договорённости, а не в долларовом пересчёте.
+    $debtsByCur = carrier_debt_by_currency();
+    $ids = array_keys($debtsByCur);
     $names = $ids ? $api->getThirdpartiesByIds($ids) : [];
-    foreach ($debts as $cid => $d) {
-        if (abs($d['debt']) <= 0.01) continue; // рассчитались — не мешаем списку
+    foreach ($debtsByCur as $cid => $byCur) {
+        if (!$byCur) continue; // рассчитались — не мешаем списку
         $soc = $names[$cid] ?? null;
         $owedCarriers[] = [
             'id' => $cid,
             'name' => is_array($soc) ? ($soc['name'] ?? $soc['nom'] ?? "#{$cid}") : "#{$cid}",
-        ] + $d;
+            'debt_by_currency' => $byCur,
+        ];
     }
-    usort($owedCarriers, fn($a, $b) => $b['debt'] <=> $a['debt']);
+    usort($owedCarriers, fn($a, $b) => debt_sort_key($b['debt_by_currency']) <=> debt_sort_key($a['debt_by_currency']));
 }
 
 // --- Карточка выбранного перевозчика ---
@@ -146,12 +153,18 @@ if ($_SESSION['selected_carrier']) {
         $payments = logistics_get_carrier_payments($cid);
         $charged = array_sum(array_column($expenses, 'usd_amount'));
         $paid = array_sum(array_column($payments, 'usd_amount'));
+        // По валютам — то, что показываем человеку. Долларовые суммы остаются для себестоимости.
+        $byCur = logistics_get_carrier_totals_by_currency($cid);
         $detail = [
             'id' => $cid,
             'name' => $soc['name'] ?? $soc['nom'] ?? '',
             'charged' => (float)$charged,
             'paid' => (float)$paid,
             'debt' => round((float)$charged - (float)$paid, 2),
+            'array_options' => $soc['array_options'] ?? [],
+            'charged_by_currency' => $byCur['charged'],
+            'paid_by_currency' => $byCur['paid'],
+            'debt_by_currency' => $byCur['debt'],
         ];
         $documents = $api->getCarrierDocuments($cid);
     }
@@ -207,10 +220,12 @@ require __DIR__ . '/includes/layout_top.php';
           <input type="hidden" name="carrier_name" value="<?= htmlspecialchars($c['name']) ?>">
           <button type="submit" class="debtor-block-btn">
             <span class="debtor-block-name"><?= htmlspecialchars($c['name']) ?></span>
-            <?php if ($c['debt'] > 0): ?>
-              <span class="badge badge-debt">Должны: <?= number_format($c['debt'], 2) ?> $</span>
+            <?php $cOwe = array_filter($c['debt_by_currency'], fn($v) => $v > 0.01); ?>
+            <?php $cOver = array_filter($c['debt_by_currency'], fn($v) => $v < -0.01); ?>
+            <?php if ($cOwe): ?>
+              <span class="badge badge-debt">Должны: <?= htmlspecialchars(money_by_currency($cOwe)) ?></span>
             <?php else: ?>
-              <span class="badge badge-ok">Переплата: <?= number_format(abs($c['debt']), 2) ?> $</span>
+              <span class="badge badge-ok">Переплата: <?= htmlspecialchars(money_by_currency(array_map('abs', $cOver))) ?></span>
             <?php endif; ?>
           </button>
         </form>
@@ -225,11 +240,11 @@ require __DIR__ . '/includes/layout_top.php';
 <div class="card">
   <h2>Баланс</h2>
   <div class="row">
-    <div><div class="muted">Начислено</div><div style="font-size:20px; font-weight:700"><?= number_format($detail['charged'], 2) ?> $</div></div>
-    <div><div class="muted">Оплачено</div><div style="font-size:20px; font-weight:700"><?= number_format($detail['paid'], 2) ?> $</div></div>
+    <div><div class="muted">Начислено</div><div style="font-size:20px; font-weight:700"><?= htmlspecialchars(money_by_currency($detail['charged_by_currency'])) ?></div></div>
+    <div><div class="muted">Оплачено</div><div style="font-size:20px; font-weight:700"><?= htmlspecialchars(money_by_currency($detail['paid_by_currency'])) ?></div></div>
     <div>
       <div class="muted"><?= $detail['debt'] > 0 ? 'Долг' : ($detail['debt'] < 0 ? 'Переплата' : 'Баланс') ?></div>
-      <div style="font-size:20px; font-weight:700" class="<?= $detail['debt'] > 0.01 ? 'err' : 'ok' ?>"><?= number_format(abs($detail['debt']), 2) ?> $</div>
+      <div style="font-size:20px; font-weight:700" class="<?= $detail['debt'] > 0.01 ? 'err' : 'ok' ?>"><?= htmlspecialchars(money_by_currency(array_map('abs', $detail['debt_by_currency']))) ?></div>
     </div>
   </div>
 </div>
@@ -257,12 +272,85 @@ require __DIR__ . '/includes/layout_top.php';
       <label>Курс (за 1$)</label>
       <input type="number" step="0.0001" min="0.0001" name="rate">
     </div>
+    <div>
+      <label>За какой рейс (необязательно)</label>
+      <?php $openShipments = array_filter(shipments_list((int)$detail['id'], 50),
+                                          fn($sh) => $sh['status']['code'] !== 'paid'); ?>
+      <select name="shipment_id">
+        <option value="">— в общий долг —</option>
+        <?php foreach ($openShipments as $sh): ?>
+          <option value="<?= (int)$sh['rowid'] ?>">
+            <?= htmlspecialchars(trim($sh['route_from'] . ' → ' . $sh['route_to'], ' →')) ?>
+            <?= $sh['invoice_number'] ? '· инвойс ' . htmlspecialchars($sh['invoice_number']) : '' ?>
+            (<?= htmlspecialchars(money((float)($sh['invoice_amount'] ?? $sh['agreed_amount']), $sh['currency'])) ?>)
+          </option>
+        <?php endforeach; ?>
+      </select>
+    </div>
     <div><label>Комментарий (необязательно)</label><input type="text" name="comment"></div>
     <div style="flex:0"><button type="submit">Оплатить</button></div>
   </form>
   <script>document.getElementById('carrierPayAccount').dispatchEvent(new Event('change'));</script>
 </div>
 <?php endif; ?>
+
+<?php
+  // Договор перевозки: сколько выбрано по лимиту (B6, 05.09.2026). Показывается, только если
+  // договор реально заведён — у большинства перевозчиков его может не быть.
+  $cOpts = $detail['array_options'] ?? [];
+  $contractAmount   = (float)($cOpts['options_contract_amount'] ?? 0);
+  $contractCurrency = strtoupper((string)($cOpts['options_contract_currency'] ?? '')) ?: 'USD';
+  $contractNumber   = (string)($cOpts['options_contract_number'] ?? '');
+  $contractStartTs  = !empty($cOpts['options_contract_start']) ? (int)$cOpts['options_contract_start'] : null;
+?>
+<?php if ($contractAmount > 0): ?>
+  <?php
+    $usage = shipments_contract_usage((int)$detail['id'], $contractCurrency, $contractStartTs);
+    $left = $contractAmount - $usage['used'];
+    $pct = $contractAmount > 0 ? min(100, max(0, $usage['used'] / $contractAmount * 100)) : 0;
+  ?>
+  <div class="card">
+    <h2>Договор перевозки<?= $contractNumber ? ' № ' . htmlspecialchars($contractNumber) : '' ?></h2>
+    <p>
+      <strong><?= htmlspecialchars(money($usage['used'], $contractCurrency)) ?></strong>
+      из <strong><?= htmlspecialchars(money($contractAmount, $contractCurrency)) ?></strong>
+      <span class="muted">· рейсов: <?= (int)$usage['count'] ?><?= $contractStartTs ? ' с ' . date('d.m.Y', $contractStartTs) : '' ?></span>
+    </p>
+    <div class="contract-bar"><div class="contract-bar-fill <?= $left < 0 ? 'over' : '' ?>" style="width: <?= $pct ?>%"></div></div>
+    <p class="<?= $left < 0 ? 'err' : 'muted' ?>">
+      <?= $left < 0
+            ? 'Договор превышен на ' . htmlspecialchars(money(abs($left), $contractCurrency))
+            : 'Осталось по договору: ' . htmlspecialchars(money($left, $contractCurrency)) ?>
+    </p>
+    <?php if (!empty($usage['other'])): ?>
+      <p class="warn">Есть рейсы в другой валюте (<?= htmlspecialchars(money_by_currency($usage['other'])) ?>)
+        — в лимит договора они не засчитаны, договор в <?= htmlspecialchars(cur_symbol($contractCurrency)) ?>.</p>
+    <?php endif; ?>
+  </div>
+<?php endif; ?>
+
+<div class="card">
+  <h2>Рейсы этого перевозчика</h2>
+  <?php $carrierShipments = shipments_list((int)$detail['id'], 50); ?>
+  <?php if (empty($carrierShipments)): ?>
+    <p class="muted">Рейсов ещё не было.
+      <a href="shipments.php">Записать рейс →</a></p>
+  <?php else: ?>
+    <table>
+      <tr><th>Маршрут</th><th>Что едет</th><th>Цена</th><th>Инвойс</th><th>Положение</th><th></th></tr>
+      <?php foreach ($carrierShipments as $sh): ?>
+        <tr>
+          <td class="muted"><?= htmlspecialchars(trim($sh['route_from'] . ' → ' . $sh['route_to'], ' →')) ?></td>
+          <td class="muted"><?= htmlspecialchars(shipment_scope_label($sh, $api)) ?></td>
+          <td><?= htmlspecialchars(money((float)$sh['agreed_amount'], $sh['currency'])) ?></td>
+          <td class="muted"><?= $sh['invoice_number'] ? htmlspecialchars($sh['invoice_number']) : '—' ?></td>
+          <td><span class="badge badge-<?= $sh['status']['cls'] === 'ok' ? 'ok' : ($sh['status']['cls'] === 'warn' ? 'warn' : 'neutral') ?>"><?= htmlspecialchars($sh['status']['label']) ?></span></td>
+          <td><a class="btn secondary small" href="shipments.php?id=<?= (int)$sh['rowid'] ?>">Открыть</a></td>
+        </tr>
+      <?php endforeach; ?>
+    </table>
+  <?php endif; ?>
+</div>
 
 <div class="card">
   <h2>Начисленные расходы</h2>
@@ -274,9 +362,9 @@ require __DIR__ . '/includes/layout_top.php';
       <?php foreach ($expenses as $e): ?>
         <tr>
           <td class="muted"><?= $e['scope_type'] === 'batch' ? 'Партия #' . $e['scope_id'] : 'Заказ #' . $e['scope_id'] ?></td>
-          <td><?= htmlspecialchars(LOGISTICS_EXPENSE_TYPES[$e['expense_type']] ?? $e['expense_type']) ?></td>
-          <td><?= number_format((float)$e['native_amount'], 2) ?> <?= htmlspecialchars($e['native_currency']) ?><?= $e['rate'] ? ' (курс ' . number_format((float)$e['rate'], 2) . ')' : '' ?></td>
-          <td><?= number_format((float)$e['usd_amount'], 2) ?> $</td>
+          <td><?= htmlspecialchars(logistics_expense_type_label($e['expense_type'])) ?></td>
+          <td><?= htmlspecialchars(money((float)$e['native_amount'], (string)$e['native_currency'])) ?><?= $e['rate'] ? ' (курс ' . number_format((float)$e['rate'], 2) . ')' : '' ?></td>
+          <td><?= htmlspecialchars(money((float)$e['usd_amount'], 'USD')) ?></td>
           <td class="muted"><?= htmlspecialchars(substr($e['datec'], 0, 16)) ?></td>
           <td class="muted"><?= htmlspecialchars($e['comment']) ?></td>
         </tr>
@@ -294,8 +382,8 @@ require __DIR__ . '/includes/layout_top.php';
       <tr><th>Сумма</th><th>$</th><th>Когда</th><th>Комментарий</th></tr>
       <?php foreach ($payments as $p): ?>
         <tr>
-          <td><?= number_format((float)$p['native_amount'], 2) ?> <?= htmlspecialchars($p['native_currency']) ?><?= $p['rate'] ? ' (курс ' . number_format((float)$p['rate'], 2) . ')' : '' ?></td>
-          <td><?= number_format((float)$p['usd_amount'], 2) ?> $</td>
+          <td><?= htmlspecialchars(money((float)$p['native_amount'], (string)$p['native_currency'])) ?><?= $p['rate'] ? ' (курс ' . number_format((float)$p['rate'], 2) . ')' : '' ?></td>
+          <td><?= htmlspecialchars(money((float)$p['usd_amount'], 'USD')) ?></td>
           <td class="muted"><?= htmlspecialchars(substr($p['datec'], 0, 16)) ?></td>
           <td class="muted"><?= htmlspecialchars($p['comment']) ?></td>
         </tr>

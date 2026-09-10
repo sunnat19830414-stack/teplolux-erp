@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/includes/auth.php';
+require_once __DIR__ . '/includes/debt.php';   // сальдо по валютам (05.09.2026)
 require_once __DIR__ . '/includes/supplier_statement.php';
 
 // Те же счета списания, что и в "Оплата поставщикам"/"Перевозчики" — включая личную кассу закупщика.
@@ -146,6 +147,7 @@ if ($_SESSION['selected_supplier']) {
         $contractStartTs = !empty($opts['options_contract_start']) ? (int)$opts['options_contract_start'] : null;
 
         $spent = 0.0;
+        $spentByCur = [];   // 05.09.2026: считаем в валюте заказа, а не всё скопом в долларах
         $orderCount = 0;
         $contractOrders = [];
         $currencies = [];
@@ -157,14 +159,18 @@ if ($_SESSION['selected_supplier']) {
                     $date = (int)($o['date_commande'] ?? 0);
                     // считаем заказы, дошедшие хотя бы до "утверждён" (2+), с даты начала контракта
                     if ($statut >= 2 && $statut <= 5 && $date >= $contractStartTs) {
-                        $currency = $o['multicurrency_code'] ?: 'USD';
-                        $spent += (float)($o['total_ttc'] ?? 0);
+                        $currency = strtoupper((string)($o['multicurrency_code'] ?: 'USD'));
+                        $totalNative = $currency === 'USD'
+                            ? (float)($o['total_ttc'] ?? 0)
+                            : (float)($o['multicurrency_total_ttc'] ?? $o['total_ttc'] ?? 0);
+                        $spent += (float)($o['total_ttc'] ?? 0);   // доллары — для полосы заполнения
+                        $spentByCur[$currency] = ($spentByCur[$currency] ?? 0) + $totalNative;
                         $orderCount++;
                         $currencies[$currency] = true;
                         $contractOrders[] = [
                             'ref' => $o['ref'] ?? '',
                             'date' => $date ? date('d.m.Y', $date) : '',
-                            'total_ttc' => (float)($o['total_ttc'] ?? 0),
+                            'total_ttc' => $totalNative,
                             'currency' => $currency,
                         ];
                     }
@@ -182,6 +188,13 @@ if ($_SESSION['selected_supplier']) {
             'contract_amount' => $contractAmount,
             'contract_start' => $contractStartTs ? date('Y-m-d', $contractStartTs) : '',
             'spent' => $spent,
+            'spent_by_currency' => $spentByCur,
+            // Валюта контракта. Форма поставщика сохраняет её в родное поле Dolibarr
+            // (multicurrency_code), поэтому берём сначала его, а доп.поле — как запасной вариант.
+            // Раньше читалось только доп.поле, и карточка контракта всегда показывала доллары,
+            // какую бы валюту ни выбрали (та же ошибка, что нашёл Абдурашид у перевозчиков).
+            'contract_currency' => strtoupper((string)($soc['multicurrency_code'] ?? ''))
+                                   ?: (strtoupper((string)($opts['options_contract_currency'] ?? '')) ?: 'USD'),
             'remaining' => $contractAmount - $spent,
             'order_count' => $orderCount,
             'orders' => $contractOrders,
@@ -199,8 +212,10 @@ if ($_SESSION['selected_supplier']) {
 
         $supplierDocuments = $api->getPartyDocuments($id);
 
-        // Выписка / сальдо (топ-5 пункт 4, 02.09.2026) — штатный агрегат Dolibarr + своя хронология.
-        $outstanding = $api->getSupplierOutstanding($id);
+        // Выписка / сальдо (топ-5 пункт 4, 02.09.2026). 05.09.2026: сальдо считаем сами и ПО
+        // ВАЛЮТАМ — штатный getOutstandingBills() отдаёт только долларовый пересчёт, а платить
+        // поставщику надо в валюте его счёта.
+        $balanceByCur = supplier_debt_by_currency($id)[$id] ?? [];
         $statementRows = build_supplier_statement($api, $id);
     }
 }
@@ -316,13 +331,16 @@ require __DIR__ . '/includes/layout_top.php';
 
   <?php if ($detail['contract_amount'] > 0 && $detail['contract_start']): ?>
     <p>Закуплено с <?= date('d.m.Y', strtotime($detail['contract_start'])) ?>:
-      <strong><?= number_format($detail['spent'], 2) ?> $</strong> из <strong><?= number_format($detail['contract_amount'], 2) ?> $</strong>
+      <strong><?= htmlspecialchars(money_by_currency($detail['spent_by_currency'], $detail['contract_currency'])) ?></strong>
+      из <strong><?= htmlspecialchars(money($detail['contract_amount'], $detail['contract_currency'])) ?></strong>
       (<?= $detail['order_count'] ?> заказ(ов))</p>
     <div class="contract-bar">
       <div class="contract-bar-fill <?= $detail['remaining'] < 0 ? 'over' : '' ?>" style="width: <?= min(100, max(0, $detail['contract_amount'] > 0 ? ($detail['spent'] / $detail['contract_amount'] * 100) : 0)) ?>%"></div>
     </div>
     <p class="<?= $detail['remaining'] < 0 ? 'err' : 'ok' ?>">
-      <?= $detail['remaining'] < 0 ? 'Контракт превышен на ' . number_format(abs($detail['remaining']), 2) . ' $' : 'Осталось по контракту: ' . number_format($detail['remaining'], 2) . ' $' ?>
+      <?= $detail['remaining'] < 0
+            ? 'Контракт превышен на ' . htmlspecialchars(money(abs($detail['remaining']), $detail['contract_currency']))
+            : 'Осталось по контракту: ' . htmlspecialchars(money($detail['remaining'], $detail['contract_currency'])) ?>
     </p>
     <?php if ($detail['mixed_currency']): ?>
       <p class="warn">Внимание: заказы в этот период оформлены в РАЗНЫХ валютах — сумма выше сложена "как есть", без конвертации. Смотрите валюту каждого заказа в списке ниже.</p>
@@ -348,8 +366,23 @@ require __DIR__ . '/includes/layout_top.php';
   <h2>Выписка / сальдо</h2>
   <div class="row" style="align-items:center; margin-bottom:10px">
     <div>
-      <div class="muted"><?= $outstanding['opened'] > 0 ? 'Мы должны поставщику' : ($outstanding['opened'] < 0 ? 'Предоплата / переплата' : 'Сальдо') ?></div>
-      <div style="font-size:22px; font-weight:700" class="<?= $outstanding['opened'] > 0.01 ? 'err' : 'ok' ?>"><?= number_format(abs($outstanding['opened']), 2) ?> $</div>
+      <?php
+        // Долг может быть сразу в нескольких валютах — показываем строками, не складываем.
+        $owe  = array_filter($balanceByCur, fn($v) => $v > 0.01);
+        $over = array_filter($balanceByCur, fn($v) => $v < -0.01);
+      ?>
+      <?php if ($owe): ?>
+        <div class="muted">Мы должны поставщику</div>
+        <div style="font-size:22px; font-weight:700" class="err"><?= htmlspecialchars(money_by_currency($owe)) ?></div>
+      <?php endif; ?>
+      <?php if ($over): ?>
+        <div class="muted"<?= $owe ? ' style="margin-top:6px"' : '' ?>>Предоплата / переплата</div>
+        <div style="font-size:22px; font-weight:700" class="ok"><?= htmlspecialchars(money_by_currency(array_map('abs', $over))) ?></div>
+      <?php endif; ?>
+      <?php if (!$owe && !$over): ?>
+        <div class="muted">Сальдо</div>
+        <div style="font-size:22px; font-weight:700" class="ok"><?= htmlspecialchars(money(0.0)) ?></div>
+      <?php endif; ?>
     </div>
     <div style="flex:0"><a class="btn secondary small" href="supplier_statement_excel.php?supplier_id=<?= $detail['id'] ?>">📄 Скачать выписку (Excel)</a></div>
   </div>
@@ -363,8 +396,8 @@ require __DIR__ . '/includes/layout_top.php';
           <td class="muted"><?= $r['date'] ? date('d.m.Y', $r['date']) : '' ?></td>
           <td><?= htmlspecialchars($r['kind_label']) ?></td>
           <td class="muted"><?= htmlspecialchars($r['ref']) ?><?= $r['ref_supplier'] ? ' (' . htmlspecialchars($r['ref_supplier']) . ')' : '' ?></td>
-          <td class="<?= $r['amount'] < 0 ? 'ok' : '' ?>"><?= ($r['amount'] >= 0 ? '+' : '') . number_format($r['amount'], 2) ?> $</td>
-          <td><?= number_format($r['balance'], 2) ?> $</td>
+          <td class="<?= $r['amount'] < 0 ? 'ok' : '' ?>"><?= ($r['amount'] >= 0 ? '+' : '') . htmlspecialchars(money($r['amount'], $r['currency'])) ?></td>
+          <td><?= htmlspecialchars(money($r['balance'], $r['currency'])) ?></td>
         </tr>
       <?php endforeach; ?>
     </table>

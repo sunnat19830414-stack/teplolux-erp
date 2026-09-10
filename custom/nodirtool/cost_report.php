@@ -78,7 +78,7 @@ require __DIR__ . '/includes/layout_top.php';
             : '📄 Заказ ' . ($orderLabel[$r['scope_id']] ?? ('#' . $r['scope_id']));
           $expenseParts = [];
           foreach ($r['expenses'] as $type => $amt) {
-            if ($amt > 0.01) $expenseParts[] = (LOGISTICS_EXPENSE_TYPES[$type] ?? $type) . ': ' . number_format($amt, 2) . '$';
+            if ($amt > 0.01) $expenseParts[] = logistics_expense_type_label($type) . ': ' . number_format($amt, 2) . '$';
           }
         ?>
         <tr data-product-name="<?= htmlspecialchars(mb_strtolower($productLabel[$pid] ?? '')) ?>">

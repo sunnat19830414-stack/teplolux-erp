@@ -4,6 +4,7 @@
  * кроме login.php. В отличие от TeplouxKassa — конфиг один общий (без направлений).
  */
 require_once __DIR__ . '/session_boot.php';
+require_once __DIR__ . '/money.php';   // money()/cur_symbol() — нужны почти на каждой странице
 session_start();
 
 $cfg = require __DIR__ . '/../config.php';

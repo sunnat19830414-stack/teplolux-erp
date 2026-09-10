@@ -183,6 +183,14 @@ function report_purchases(DolibarrApi $api, string $from, string $to): array
 }
 
 /** Долги поставщикам: по неоплаченным счетам, сгруппированные по контрагенту. */
+/**
+ * Кому должны — В ВАЛЮТЕ СЧЁТА (05.09.2026, требование пользователя: «долг показываешь на своих
+ * валютах — то есть то, что мы должны оплатить»). Раньше складывались `total_ttc`, то есть
+ * долларовый пересчёт, и европейский счёт выглядел долларовым.
+ *
+ * Возвращает [socId => ['EUR' => 1200.00, 'USD' => 300.00]] — уже отсортированное по величине
+ * долга (по долларовому эквиваленту; сам эквивалент на экран не выводится).
+ */
 function report_supplier_debts(DolibarrApi $api): array
 {
     $bySoc = [];
@@ -190,10 +198,37 @@ function report_supplier_debts(DolibarrApi $api): array
         if ((int)($inv['paye'] ?? 0) === 1) continue;
         if ((int)($inv['statut'] ?? 0) === 0) continue;      // черновики не долг
         $socId = (int)($inv['socid'] ?? 0);
-        $bySoc[$socId] = ($bySoc[$socId] ?? 0) + (float)($inv['total_ttc'] ?? 0);
+        $cur = strtoupper(trim((string)($inv['multicurrency_code'] ?? ''))) ?: 'USD';
+        $amount = $cur === 'USD'
+            ? (float)($inv['total_ttc'] ?? 0)
+            : (float)($inv['multicurrency_total_ttc'] ?? $inv['total_ttc'] ?? 0);
+        $bySoc[$socId][$cur] = ($bySoc[$socId][$cur] ?? 0) + $amount;
     }
-    arsort($bySoc);
+    // Сортировка по долларовому эквиваленту — разные валюты одним числом не сравнить.
+    $rates = report_currency_rates();
+    uasort($bySoc, fn($a, $b) => money_usd_equivalent($b, $rates) <=> money_usd_equivalent($a, $rates));
     return $bySoc;
+}
+
+/** Курсы (единиц валюты за 1 доллар) — только для сортировки списков, на экран не идут. */
+function report_currency_rates(): array
+{
+    static $rates = null;
+    if ($rates !== null) return $rates;
+    $rates = ['USD' => 1.0];
+    $db = stock_lookup_db();
+    $res = $db->query("SELECT c.code, r.rate
+                         FROM llx_multicurrency c
+                         JOIN llx_multicurrency_rate r ON r.fk_multicurrency = c.rowid
+                        WHERE c.entity = 1
+                        ORDER BY r.date_sync, r.rowid");
+    if ($res) {
+        while ($x = $res->fetch_assoc()) {
+            $rate = (float)$x['rate'];
+            if ($rate > 0) $rates[strtoupper($x['code'])] = $rate;   // последняя запись — самая свежая
+        }
+    }
+    return $rates;
 }
 
 // ---------------------------------------------------------------- зарплата, хозрасходы, доходы
@@ -278,17 +313,33 @@ function report_demand(array $directions, string $from, string $to, int $horizon
         $dirCond = " AND pe.kod_sap LIKE '" . $db->real_escape_string($directions[0]) . "%'";
     }
 
-    // Продано за период: строки клиентских счетов (type=0 — продажи; кредит-ноты вычитаем).
-    $sql = "SELECT d.fk_product,
-                   SUM(CASE WHEN f.type = 2 THEN -d.qty ELSE d.qty END) AS sold,
+    // Продано за период: перенесённая из SAP история (по месяцам) + живые счета Dolibarr.
+    // Живые считаем строго ПОСЛЕ последнего месяца истории — иначе пограничный период сложился бы
+    // дважды. Кредит-ноты вычитаются в обоих источниках.
+    $fromEsc = $db->real_escape_string($from);
+    $toEsc   = $db->real_escape_string($to);
+    $lastRow = $db->query("SELECT MAX(period) mx FROM llx_nt_sales_history");
+    $lastPeriod = ($lastRow && ($x = $lastRow->fetch_assoc()) && !empty($x['mx'])) ? (string)$x['mx'] : null;
+    $cut = $lastPeriod !== null ? " AND f.datef > LAST_DAY('" . $db->real_escape_string($lastPeriod) . "-01')" : '';
+
+    $sql = "SELECT s.fk_product,
+                   SUM(s.sold) AS sold,
                    p.ref, p.label, p.stock AS stock, pe.kod_sap
-            FROM llx_facturedet d
-            JOIN llx_facture f ON f.rowid = d.fk_facture
-            JOIN llx_product p ON p.rowid = d.fk_product
+            FROM (
+                SELECT h.fk_product, (h.qty_sold - h.qty_returned) AS sold
+                FROM llx_nt_sales_history h
+                WHERE h.period BETWEEN SUBSTRING('$fromEsc',1,7) AND SUBSTRING('$toEsc',1,7)
+                UNION ALL
+                SELECT d.fk_product, (CASE WHEN f.type = 2 THEN -d.qty ELSE d.qty END) AS sold
+                FROM llx_facturedet d
+                JOIN llx_facture f ON f.rowid = d.fk_facture
+                WHERE f.datef BETWEEN '$fromEsc' AND '$toEsc'
+                  AND f.fk_statut > 0 AND d.fk_product > 0" . $cut . "
+            ) s
+            JOIN llx_product p ON p.rowid = s.fk_product
             LEFT JOIN llx_product_extrafields pe ON pe.fk_object = p.rowid
-            WHERE f.datef BETWEEN '" . $db->real_escape_string($from) . "' AND '" . $db->real_escape_string($to) . "'
-              AND f.fk_statut > 0 AND d.fk_product > 0" . $dirCond . "
-            GROUP BY d.fk_product
+            WHERE 1=1" . $dirCond . "
+            GROUP BY s.fk_product
             HAVING sold > 0
             ORDER BY sold DESC
             LIMIT 400";

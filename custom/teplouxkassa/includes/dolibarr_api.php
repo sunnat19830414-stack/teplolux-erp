@@ -521,11 +521,24 @@ class DolibarrApi
      * Dolibarr, не наша самодеятельность) — так связь видна и в самом интерфейсе Dolibarr, не только
      * в нашем приложении.
      */
-    public function createCreditNote(int $socId, ?int $sourceInvoiceId = null)
+    public function createCreditNote(int $socId, ?int $sourceInvoiceId = null, string $docKind = '')
     {
         $data = ['socid' => $socId, 'type' => 2];
         if ($sourceInvoiceId) $data['fk_facture_source'] = $sourceInvoiceId;
+        // M1 (финансовый аудит 05.09.2026): вид документа — отдельным полем. Аванс, выдача денег и
+        // возврат все являются кредит-нотами (type=2), и сменный отчёт различал их по СЛОВАМ в
+        // описании строки: кассир, написав в причине выдачи «Возврат аванса…», ломал классификацию.
+        if ($docKind !== '') $data['array_options'] = ['options_doc_kind' => $docKind];
         return $this->post('invoices', $data);
+    }
+
+    /**
+     * Вид документа, если он проставлен ('advance' | 'payout' | 'return'). Пусто у документов,
+     * созданных до 05.09.2026, — для них остаётся прежнее определение по содержимому.
+     */
+    public function getInvoiceDocKind(array $invoice): string
+    {
+        return (string)($invoice['array_options']['options_doc_kind'] ?? '');
     }
 
     /**

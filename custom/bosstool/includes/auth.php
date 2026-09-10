@@ -7,6 +7,7 @@
  * прямой ссылкой, а не только скрытым пунктом меню.
  */
 require_once __DIR__ . '/session_boot.php';
+require_once __DIR__ . '/money.php';   // money()/cur_symbol() — общий файл с NodirTool
 session_start();
 
 $cfg = require __DIR__ . '/../config.php';
@@ -98,10 +99,9 @@ function flash_get(): ?array
 }
 
 /** Деньги одинаково во всём инструменте. */
-function money(float $v, string $currency = '$'): string
-{
-    return number_format($v, 2, '.', ' ') . ' ' . $currency;
-}
+// money()/cur_symbol() переехали в includes/money.php (05.09.2026) — общий файл с NodirTool,
+// чтобы обозначения валют были одинаковыми в обоих инструментах. Прежняя реализация принимала
+// сам символ вторым параметром; новая принимает КОД валюты и терпит символ (обратная совместимость).
 
 /** Название месяца по-русски (в родительном падеже — «за сентябрь»). PHP-локали на этом сервере ненадёжны. */
 function month_name_ru(int $month): string

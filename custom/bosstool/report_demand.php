@@ -47,6 +47,12 @@ require __DIR__ . '/includes/layout_top.php';
   </form>
   <p class="muted">Расход считается по продажам за выбранный период (<?= (int)$d['days'] ?> дн.).
   Чем длиннее период, тем спокойнее цифра: за неделю случайная крупная отгрузка сильно её задерёт.</p>
+  <?php
+    // Откуда данные: история перенесена из SAP, поэтому период можно брать длиннее, чем существует
+    // сам Dolibarr — иначе непонятно, почему за 2025 год что-то показывается.
+    require_once __DIR__ . '/includes/order_suggest.php';
+  ?>
+  <p class="muted"><?= htmlspecialchars(ucfirst(sales_history_note())) ?>.</p>
 </div>
 
 <div class="card">

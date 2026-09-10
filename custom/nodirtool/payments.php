@@ -2,6 +2,8 @@
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/invoice_lock.php'; // N-2 — блокировка от двойной оплаты (см. файл)
 require_once __DIR__ . '/includes/currency.php';
+require_once __DIR__ . '/includes/debt.php';   // долг в валюте счёта (05.09.2026)
+require_once __DIR__ . '/includes/payment_terms.php'; // срок оплаты счёта (B7, 05.09.2026)
 
 if (!array_key_exists('pay_supplier', $_SESSION)) $_SESSION['pay_supplier'] = null;
 
@@ -138,7 +140,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $message = "Счёт #$invId создан с позициями, но не проведён: " . $api->lastError;
                             $messageType = 'err';
                         } else {
-                            $message = "Счёт поставщика #$invId создан из заказа {$order['ref']} и проведён.";
+                            // Срок оплаты (B7, 05.09.2026): условие берём из карточки поставщика,
+                            // дату считаем от даты счёта. Проставляем ПОСЛЕ проведения — Dolibarr при
+                            // валидации переписывает часть полей счёта.
+                            $termId = supplier_payment_term((int)$order['socid']);
+                            $dueInfo = '';
+                            if ($termId) {
+                                $freshInv = $api->getSupplierInvoice($invId);
+                                $invDate = is_array($freshInv) && !empty($freshInv['date'])
+                                    ? date('Y-m-d', (int)$freshInv['date']) : date('Y-m-d');
+                                $due = payment_term_due_date($termId, $invDate);
+                                if ($due && set_invoice_due_date($invId, $termId, $due)) {
+                                    $dueInfo = ' Оплатить до ' . date('d.m.Y', strtotime($due)) . '.';
+                                }
+                            }
+                            $message = "Счёт поставщика #$invId создан из заказа {$order['ref']} и проведён." . $dueInfo;
                             if ($byReceived) {
                                 $message .= " Поставщик работает по ПОСТОПЛАТЕ — счёт оформлен по РЕАЛЬНО ПРИНЯТОМУ количеству.";
                                 if ($shortfalls) {
@@ -154,6 +170,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         }
                     }
                 }
+            }
+        }
+    } elseif ($action === 'cancel_invoice') {
+        // R5 отчёта «Пробелы NodirTool»: возврат счёта в черновик был написан и проверен, но ни на
+        // одну кнопку не выведен — ошибочный счёт навсегда оставался в сальдо поставщика, убрать
+        // его мог только Суннат из самого Dolibarr. Прав на УДАЛЕНИЕ у служебного пользователя
+        // намеренно нет, и это правильно: черновик из сальдо уже уходит, а след документа остаётся.
+        $invId = (int)($_POST['invoice_id'] ?? 0);
+        $inv = $invId ? $api->getSupplierInvoice($invId) : null;
+        if (!is_array($inv)) {
+            $message = 'Счёт не найден.';
+            $messageType = 'err';
+        } else {
+            // Если по счёту уже платили — в черновик нельзя: оплаты остались бы висеть без документа.
+            $paid = supplier_paid_native([$invId])[$invId] ?? 0.0;
+            if (abs($paid) > 0.01) {
+                $message = 'По счёту уже прошла оплата — вернуть его в черновик нельзя. '
+                         . 'Если счёт ошибочный, сначала разберитесь с оплатой; при необходимости сообщите Суннату.';
+                $messageType = 'err';
+            } elseif (!$api->setSupplierInvoiceToDraft($invId)) {
+                $message = 'Не удалось вернуть счёт в черновик: ' . $api->lastError;
+                $messageType = 'err';
+            } else {
+                flash_set('Счёт ' . ($inv['ref'] ?? "#$invId") . ' возвращён в черновик — из долга поставщика он убран. '
+                        . 'Сам документ остался в Dolibarr, удалить его может только Суннат.', 'ok');
+                header('Location: payments.php');
+                exit;
             }
         }
     } elseif ($action === 'pay_invoice') {
@@ -260,22 +303,20 @@ if ($flash) {
 // просто ещё не формализованный документом) — считаем и показываем оба сигнала в одном блоке.
 $owedSuppliers = [];
 if (empty($_SESSION['pay_supplier'])) {
-    $bySoc = []; // socid => ['unpaid'=>float, 'invCount'=>int, 'pendingCount'=>int, 'pendingSum'=>float]
+    // socid => ['unpaid'=>['EUR'=>..,'USD'=>..], 'invCount'=>int, 'pendingCount'=>int, 'pendingSum'=>[...]]
+    $bySoc = [];
 
-    $rawUnpaid = $api->getUnpaidSupplierInvoices();
-    if (is_array($rawUnpaid)) {
-        foreach ($rawUnpaid as $inv) {
-            $socid = (int)($inv['socid'] ?? 0);
-            if (!$socid) continue;
-            $invId = (int)$inv['id'];
-            $paidSum = 0;
-            foreach ($api->getSupplierInvoicePayments($invId) as $p) { $paidSum += (float)($p['amount'] ?? 0); }
-            $remaining = (float)($inv['total_ttc'] ?? 0) - $paidSum;
-            if ($remaining <= 0.01) continue; // счёт числится "unpaid", но по факту уже добит частичными оплатами
-            if (!isset($bySoc[$socid])) $bySoc[$socid] = ['unpaid' => 0, 'invCount' => 0, 'pendingCount' => 0, 'pendingSum' => 0];
-            $bySoc[$socid]['unpaid'] += $remaining;
-            $bySoc[$socid]['invCount']++;
-        }
+    // 05.09.2026: долг считается и показывается В ВАЛЮТЕ СЧЁТА (что реально надо заплатить), а не
+    // в долларовом пересчёте. Одним запросом на всю базу — заодно ушёл N+1 (раньше на КАЖДЫЙ счёт
+    // дёргался getSupplierInvoicePayments()).
+    foreach (supplier_debt_by_currency() as $socid => $byCur) {
+        $positive = array_filter($byCur, fn($v) => $v > 0.01);
+        if (!$positive) continue;   // только переплата — в «кому должны» не показываем
+        $bySoc[$socid] = ['unpaid' => $positive, 'invCount' => 0, 'pendingCount' => 0, 'pendingSum' => []];
+    }
+    foreach (supplier_unpaid_invoices() as $inv) {
+        $socid = (int)$inv['fk_soc'];
+        if (isset($bySoc[$socid]) && (float)$inv['remaining_native'] > 0.01) $bySoc[$socid]['invCount']++;
     }
 
     // BUG-N1 (внешний отчёт, 02.09.2026): заказы, по которым счёт УЖЕ создан, не должны считаться
@@ -284,20 +325,28 @@ if (empty($_SESSION['pay_supplier'])) {
     // не по поставщику в цикле.
     $invoicedRefs = $api->getInvoicedSupplierOrderRefs();
     foreach (['received_start', 'received_end'] as $st) {
-        $rows = $api->getSupplierOrdersByStatus($st, 'id,ref,socid,statut,total_ttc');
+        $rows = $api->getSupplierOrdersByStatus($st, 'id,ref,socid,statut,total_ttc,multicurrency_code,multicurrency_total_ttc');
         if (is_array($rows)) {
             foreach ($rows as $row) {
                 $socid = (int)($row['socid'] ?? 0);
                 if (!$socid) continue;
                 if (!empty($invoicedRefs[$row['ref'] ?? ''])) continue; // счёт уже есть — не "без счёта"
-                if (!isset($bySoc[$socid])) $bySoc[$socid] = ['unpaid' => 0, 'invCount' => 0, 'pendingCount' => 0, 'pendingSum' => 0];
+                if (!isset($bySoc[$socid])) $bySoc[$socid] = ['unpaid' => [], 'invCount' => 0, 'pendingCount' => 0, 'pendingSum' => []];
+                $cur = strtoupper(trim((string)($row['multicurrency_code'] ?? ''))) ?: 'USD';
+                $amount = $cur === 'USD'
+                    ? (float)($row['total_ttc'] ?? 0)
+                    : (float)($row['multicurrency_total_ttc'] ?? $row['total_ttc'] ?? 0);
                 $bySoc[$socid]['pendingCount']++;
-                $bySoc[$socid]['pendingSum'] += (float)($row['total_ttc'] ?? 0);
+                $bySoc[$socid]['pendingSum'][$cur] = ($bySoc[$socid]['pendingSum'][$cur] ?? 0) + $amount;
             }
         }
     }
 
-    uasort($bySoc, fn($a, $b) => ($b['unpaid'] + $b['pendingSum']) <=> ($a['unpaid'] + $a['pendingSum']));
+    // Сортируем по долларовому эквиваленту — сложить разные валюты в одно число нельзя, а порядок
+    // «кому должны больше всего» нужен. На экран этот эквивалент не выводится, там родная валюта.
+    uasort($bySoc, fn($a, $b) =>
+        (debt_sort_key($b['unpaid']) + debt_sort_key($b['pendingSum']))
+        <=> (debt_sort_key($a['unpaid']) + debt_sort_key($a['pendingSum'])));
 
     // Имена всех поставщиков в списке — ОДНИМ запросом, не getThirdparty() по одному в цикле
     // (см. отчёт ревью P0#5).
@@ -318,11 +367,20 @@ if ($_SESSION['pay_supplier']) {
     $socId = (int)$_SESSION['pay_supplier']['id'];
     $invoicedRefs = $api->getInvoicedSupplierOrderRefs(); // BUG-N1, см. выше — не показывать заказы, по которым счёт уже есть
     foreach (['received_start', 'received_end'] as $st) {
-        $rows = $api->getSupplierOrdersByStatus($st, 'id,ref,socid,statut,total_ttc');
+        $rows = $api->getSupplierOrdersByStatus($st, 'id,ref,socid,statut,total_ttc,multicurrency_code,multicurrency_total_ttc');
         if (is_array($rows)) {
             foreach ($rows as $row) {
                 if ((int)$row['socid'] === $socId && empty($invoicedRefs[$row['ref'] ?? ''])) {
-                    $readyOrders[] = ['id' => (int)$row['id'], 'ref' => $row['ref'], 'total_ttc' => (float)$row['total_ttc']];
+                    // Сумма заказа — в валюте заказа: платить поставщику придётся именно в ней.
+                    $oc = strtoupper(trim((string)($row['multicurrency_code'] ?? ''))) ?: 'USD';
+                    $readyOrders[] = [
+                        'id' => (int)$row['id'],
+                        'ref' => $row['ref'],
+                        'currency' => $oc,
+                        'total_ttc' => $oc === 'USD'
+                            ? (float)$row['total_ttc']
+                            : (float)($row['multicurrency_total_ttc'] ?? $row['total_ttc']),
+                    ];
                 }
             }
         }
@@ -330,30 +388,43 @@ if ($_SESSION['pay_supplier']) {
 
     $rawInvoices = $api->getSupplierInvoicesForSupplier($socId);
     if (is_array($rawInvoices)) {
+        // Оплаты по всем счетам сразу и СРАЗУ в валюте счёта (05.09.2026). Раньше здесь был вызов
+        // getSupplierInvoicePayments() на каждый счёт, и суммы приходили в долларах — валютный
+        // остаток получался пересчётом по курсу, то есть с накоплением округлений.
+        $paidNative = supplier_paid_native(array_map(fn($i) => (int)$i['id'], $rawInvoices));
+        // Сроки оплаты — тоже одним запросом: список счетов это поле не отдаёт (см. payment_terms.php).
+        $dueDates = invoice_due_dates(array_map(fn($i) => (int)$i['id'], $rawInvoices));
+
         foreach ($rawInvoices as $inv) {
             $invId = (int)$inv['id'];
-            $totalTtc = (float)($inv['total_ttc'] ?? 0);
-            $payments = $api->getSupplierInvoicePayments($invId);
-            $paidSum = 0;
-            foreach ($payments as $p) { $paidSum += (float)($p['amount'] ?? 0); }
-            $remaining = $totalTtc - $paidSum;
-            // Суммы Dolibarr ведёт в базовой валюте (доллары), а поставщику мы должны в валюте его
-            // счёта — показываем именно её, иначе европейский счёт выглядит долларовым.
             $invCur = strtoupper(trim((string)($inv['multicurrency_code'] ?? ''))) ?: 'USD';
             $invRate = (float)($inv['multicurrency_tx'] ?? 1) ?: 1.0;
-            $k = $invCur === 'USD' ? 1.0 : $invRate;
+
+            // Суммы берём из собственных полей Dolibarr, а не умножением на курс.
+            $totalTtc  = (float)($inv['total_ttc'] ?? 0);                       // доллары, для себестоимости
+            $totalCur  = $invCur === 'USD' ? $totalTtc
+                        : (float)($inv['multicurrency_total_ttc'] ?? $totalTtc); // валюта счёта — это и есть долг
+            $paidCur   = $paidNative[$invId] ?? 0.0;
+            $paidUsd   = $invCur === 'USD' ? $paidCur : ($invRate > 0 ? $paidCur / $invRate : 0.0);
+
+            // Срок оплаты (B7): сколько дней осталось — для подсветки.
+            $dueDate = $dueDates[$invId] ?? null;
+            $dueTs = $dueDate ? strtotime($dueDate) : null;
+
             $invoices[] = [
                 'id' => $invId,
                 'ref' => $inv['ref'] ?? '',
+                'due_ts' => $dueTs ?: null,
+                'days_left' => $dueTs ? (int)round(($dueTs - strtotime(date('Y-m-d'))) / 86400) : null,
                 'ref_supplier' => $inv['ref_supplier'] ?? '',
                 'total_ttc' => $totalTtc,
-                'paid' => $paidSum,
-                'remaining' => $remaining,
+                'paid' => round($paidUsd, 2),
+                'remaining' => round($totalTtc - $paidUsd, 2),
                 'currency' => $invCur,
                 'rate' => $invRate,
-                'total_cur' => $totalTtc * $k,
-                'paid_cur' => $paidSum * $k,
-                'remaining_cur' => $remaining * $k,
+                'total_cur' => round($totalCur, 2),
+                'paid_cur' => round($paidCur, 2),
+                'remaining_cur' => round($totalCur - $paidCur, 2),
             ];
         }
     }
@@ -410,11 +481,11 @@ require __DIR__ . '/includes/layout_top.php';
           <input type="hidden" name="supplier_name" value="<?= htmlspecialchars($s['name']) ?>">
           <button type="submit" class="debtor-block-btn">
             <span class="debtor-block-name"><?= htmlspecialchars($s['name']) ?></span>
-            <?php if ($s['unpaid'] > 0.01): ?>
-              <span class="badge badge-debt"><?= number_format($s['unpaid'], 2) ?> $ · <?= $s['invCount'] ?> <?= $s['invCount'] == 1 ? 'счёт' : 'счёта(ов)' ?></span>
+            <?php if (!empty($s['unpaid'])): ?>
+              <span class="badge badge-debt"><?= htmlspecialchars(money_by_currency($s['unpaid'])) ?> · <?= $s['invCount'] ?> <?= $s['invCount'] == 1 ? 'счёт' : 'счёта(ов)' ?></span>
             <?php endif; ?>
             <?php if ($s['pendingCount'] > 0): ?>
-              <span class="badge badge-warn"><?= $s['pendingCount'] ?> заказ(ов) получено, счёт не оформлен (<?= number_format($s['pendingSum'], 2) ?> $)</span>
+              <span class="badge badge-warn"><?= $s['pendingCount'] ?> заказ(ов) получено, счёт не оформлен (<?= htmlspecialchars(money_by_currency($s['pendingSum'])) ?>)</span>
             <?php endif; ?>
           </button>
         </form>
@@ -437,7 +508,7 @@ require __DIR__ . '/includes/layout_top.php';
       <?php foreach ($readyOrders as $o): ?>
         <tr>
           <td><?= htmlspecialchars($o['ref']) ?></td>
-          <td><?= number_format($o['total_ttc'], 2) ?> $</td>
+          <td><?= htmlspecialchars(money($o['total_ttc'], $o['currency'])) ?></td>
           <td>
             <form method="post">
   <?= csrf_field() ?><input type="hidden" name="action" value="create_invoice_from_order"><input type="hidden" name="order_id" value="<?= $o['id'] ?>"><button type="submit" class="small">Создать счёт</button></form>
@@ -459,17 +530,33 @@ require __DIR__ . '/includes/layout_top.php';
           <div>
             <strong><?= htmlspecialchars($inv['ref']) ?></strong>
             <?php if ($inv['ref_supplier']): ?><span class="muted"> · заказ <?= htmlspecialchars($inv['ref_supplier']) ?></span><?php endif; ?>
+            <?php if ($inv['due_ts'] && $inv['remaining_cur'] > 0.01): ?>
+              <?php $dl = $inv['days_left']; ?>
+              <span class="badge badge-<?= $dl < 0 ? 'debt' : ($dl <= 3 ? 'warn' : 'neutral') ?>">
+                <?= $dl < 0
+                      ? 'просрочен на ' . abs($dl) . ' дн.'
+                      : ($dl === 0 ? 'оплатить сегодня' : 'оплатить до ' . date('d.m.Y', $inv['due_ts'])) ?>
+              </span>
+            <?php endif; ?>
           </div>
-          <?php $ic = $inv['currency'] === 'USD' ? '$' : $inv['currency']; ?>
           <div style="text-align:right">
-            Итого: <?= number_format($inv['total_cur'], 2) ?> <?= htmlspecialchars($ic) ?> ·
-            Оплачено: <?= number_format($inv['paid_cur'], 2) ?> <?= htmlspecialchars($ic) ?> ·
-            <span class="<?= $inv['remaining'] > 0.01 ? 'err' : 'ok' ?>">Остаток: <?= number_format($inv['remaining_cur'], 2) ?> <?= htmlspecialchars($ic) ?></span>
+            Итого: <?= htmlspecialchars(money($inv['total_cur'], $inv['currency'])) ?> ·
+            Оплачено: <?= htmlspecialchars(money($inv['paid_cur'], $inv['currency'])) ?> ·
+            <span class="<?= $inv['remaining_cur'] > 0.01 ? 'err' : 'ok' ?>">Остаток: <?= htmlspecialchars(money($inv['remaining_cur'], $inv['currency'])) ?></span>
             <?php if ($inv['currency'] !== 'USD'): ?>
-              <div class="muted">в долларах ≈ <?= number_format($inv['remaining'], 2) ?> $ по курсу <?= rtrim(rtrim(number_format($inv['rate'], 4, '.', ''), '0'), '.') ?></div>
+              <div class="muted">в себестоимость пойдёт <?= htmlspecialchars(money($inv['remaining'], 'USD')) ?> по курсу <?= rtrim(rtrim(number_format($inv['rate'], 4, '.', ''), '0'), '.') ?></div>
             <?php endif; ?>
           </div>
         </div>
+        <?php if ($inv['paid_cur'] <= 0.01): ?>
+          <form method="post" style="display:inline"
+                onsubmit="return appConfirmSubmit(this, 'Вернуть счёт <?= htmlspecialchars($inv['ref']) ?> в черновик? Из долга поставщика он пропадёт. Делайте так только с ошибочно созданным счётом.')">
+            <?= csrf_field() ?>
+            <input type="hidden" name="action" value="cancel_invoice">
+            <input type="hidden" name="invoice_id" value="<?= (int)$inv['id'] ?>">
+            <button type="submit" class="small secondary">Счёт ошибочный — в черновик</button>
+          </form>
+        <?php endif; ?>
         <?php if ($inv['remaining'] > 0.01): ?>
         <?php
           // Счёт списания по умолчанию — тот, что в валюте счёта-фактуры: платить европейский счёт
