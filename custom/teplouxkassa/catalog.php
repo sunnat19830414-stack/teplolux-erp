@@ -71,10 +71,15 @@ require __DIR__ . '/includes/layout_top.php';
       <label class="muted">Категория</label>
       <select name="category">
         <option value="">все категории</option>
-        <?php foreach ($cats as $c): ?>
-          <option value="<?= (int)$c['rowid'] ?>" <?= $f['category'] === (int)$c['rowid'] ? 'selected' : '' ?>>
-            <?= htmlspecialchars($c['label']) ?> (<?= (int)$c['n'] ?>)
-          </option>
+        <?php foreach (['type' => 'По типу товара', 'brand' => 'По бренду'] as $bucket => $title): ?>
+          <?php if (empty($cats[$bucket])) continue; ?>
+          <optgroup label="<?= $title ?>">
+            <?php foreach ($cats[$bucket] as $c): ?>
+              <option value="<?= (int)$c['rowid'] ?>" <?= $f['category'] === (int)$c['rowid'] ? 'selected' : '' ?>>
+                <?= ($c['depth'] ?? 0) > 0 ? str_repeat("\u{00A0}", 4) : '' ?><?= htmlspecialchars($c['label']) ?> (<?= (int)$c['n'] ?>)
+              </option>
+            <?php endforeach; ?>
+          </optgroup>
         <?php endforeach; ?>
       </select>
     </div>

@@ -94,8 +94,12 @@ function catalog_search(mysqli $db, array $caps, array $f): array
         array_push($args, $q, $q, $q, $q); $types .= 'ssss';
     }
     if ((int)($f['category'] ?? 0) > 0) {
-        $where[] = 'EXISTS (SELECT 1 FROM llx_categorie_product cp WHERE cp.fk_product = p.rowid AND cp.fk_categorie = ?)';
-        $args[] = (int)$f['category']; $types .= 'i';
+        // вместе с подкатегориями: «Арматура» должна показать все краны и клапаны
+        $catIds = catalog_category_with_children($db, (int)$f['category']);
+        $ph = implode(',', array_fill(0, count($catIds), '?'));
+        $where[] = "EXISTS (SELECT 1 FROM llx_categorie_product cp
+                            WHERE cp.fk_product = p.rowid AND cp.fk_categorie IN ($ph))";
+        foreach ($catIds as $cid) { $args[] = $cid; $types .= 'i'; }
     }
     // «Чего не хватает» — главный смысл экрана: показать дыры, а не весь каталог подряд.
     $missingMap = [
@@ -314,20 +318,53 @@ function catalog_save(mysqli $db, $api, array $caps, int $id, array $post, strin
     return ['ok' => empty($errors), 'changed' => $changed, 'errors' => $errors];
 }
 
-/** Категории для выпадающего списка, только те, где есть товары нужных направлений. */
+/**
+ * Категории для выпадающего списка — деревом: сначала корень, следом его подкатегории
+ * с отступом. Плоский список из 124 штук (11 групп типов + 65 подгрупп + 48 брендов)
+ * не читается, а иерархия у нас появилась 10.09.2026.
+ * Считаем только товары нужных направлений, поэтому у кассы Жоми цифры свои.
+ */
 function catalog_categories(mysqli $db, array $caps): array
 {
     $dirs = $caps['directions'] ?? ['J', 'T'];
     $like = []; $args = []; $types = '';
     foreach ($dirs as $d) { $like[] = 'e.kod_sap LIKE ?'; $args[] = $d . '%'; $types .= 's'; }
-    $st = $db->prepare("SELECT c.rowid, c.label, COUNT(*) n
+    $st = $db->prepare("SELECT c.rowid, c.label, c.fk_parent, c.description, COUNT(*) n
                         FROM llx_categorie c
                         JOIN llx_categorie_product cp ON cp.fk_categorie = c.rowid
                         JOIN llx_product p ON p.rowid = cp.fk_product
                         LEFT JOIN llx_product_extrafields e ON e.fk_object = p.rowid
                         WHERE (" . implode(' OR ', $like) . ")
-                        GROUP BY c.rowid, c.label ORDER BY c.label");
+                        GROUP BY c.rowid, c.label, c.fk_parent, c.description ORDER BY c.label");
     $st->bind_param($types, ...$args); $st->execute();
-    $r = $st->get_result()->fetch_all(MYSQLI_ASSOC); $st->close();
-    return $r;
+    $all = $st->get_result()->fetch_all(MYSQLI_ASSOC); $st->close();
+
+    $byParent = [];
+    foreach ($all as $c) $byParent[(int)$c['fk_parent']][] = $c;
+
+    // Два разреза: дерево типов (создано 10.09.2026) и плоский список брендов из миграции.
+    // Признак — пометка в описании категории; по ней же их различает build_tree.php.
+    $out = ['type' => [], 'brand' => []];
+    foreach ($byParent[0] ?? [] as $root) {
+        $isType = str_starts_with((string)($root['description'] ?? ''), 'Тип товара');
+        $bucket = $isType ? 'type' : 'brand';
+        $root['depth'] = 0;
+        $out[$bucket][] = $root;
+        foreach ($byParent[(int)$root['rowid']] ?? [] as $child) {
+            $child['depth'] = 1;
+            $out[$bucket][] = $child;
+        }
+    }
+    return $out;
+}
+
+/** Категория и все её подкатегории — выбрав «Арматура», человек ждёт и краны, и клапаны. */
+function catalog_category_with_children(mysqli $db, int $id): array
+{
+    $ids = [$id];
+    $st = $db->prepare("SELECT rowid FROM llx_categorie WHERE fk_parent = ?");
+    $st->bind_param('i', $id); $st->execute();
+    foreach ($st->get_result()->fetch_all(MYSQLI_ASSOC) as $r) $ids[] = (int)$r['rowid'];
+    $st->close();
+    return $ids;
 }
