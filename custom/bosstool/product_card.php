@@ -12,8 +12,8 @@ require_once __DIR__ . '/includes/catalog.php';
 // У Суннатиллы направление своё (только Турк), у Умида — оба. Берём из auth.php, а не из URL.
 $caps = [
     'directions' => visible_directions($cfg),
-    'view'       => ['phys', 'customs', 'purchase', 'stock'],
-    'edit'       => ['phys', 'customs', 'price'],
+    'view'       => ['phys', 'customs', 'purchase', 'stock', 'dealer'],
+    'edit'       => ['phys', 'customs', 'price', 'dealer'],
 ];
 
 $db  = catalog_db();

@@ -53,6 +53,9 @@ function catalog_fields(): array
         'label'          => ['group'=>'base',    'col'=>'label',       'type'=>'text',  'title'=>'Наименование'],
         'description'    => ['group'=>'phys',    'col'=>'description', 'type'=>'area',  'title'=>'Описание'],
         'price'          => ['group'=>'price',   'col'=>'price',       'type'=>'money', 'title'=>'Цена продажи', 'unit'=>'USD'],
+        // Дилерская цена: залита 10.09.2026 из базы «Бизнес» склада Турк (Bus.gdb, колонка PRICE1).
+        // Ниже розничной примерно на 20% там, где уровни вообще различаются.
+        'dealer_price'   => ['group'=>'dealer',  'ef'=>'dealer_price', 'type'=>'money', 'title'=>'Дилерская цена', 'unit'=>'USD'],
         'weight'         => ['group'=>'phys',    'col'=>'weight',      'type'=>'num',   'title'=>'Вес единицы',  'unit'=>'кг', 'step'=>'0.0001'],
         'weight_net'     => ['group'=>'phys',    'ef'=>'weight_net',   'type'=>'num',   'title'=>'Вес нетто',    'unit'=>'кг', 'step'=>'0.0001'],
         'weight_gross'   => ['group'=>'phys',    'ef'=>'weight_gross', 'type'=>'num',   'title'=>'Вес брутто',   'unit'=>'кг', 'step'=>'0.0001'],

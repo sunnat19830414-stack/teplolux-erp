@@ -11,8 +11,8 @@ require_once __DIR__ . '/includes/catalog.php';
 
 $caps = [
     'directions' => ['J', 'T'],          // закупщики работают по обоим направлениям (см. CLAUDE.md)
-    'view'       => ['phys', 'customs', 'purchase', 'stock'],
-    'edit'       => ['phys', 'customs', 'price'],
+    'view'       => ['phys', 'customs', 'purchase', 'stock', 'dealer'],
+    'edit'       => ['phys', 'customs', 'price', 'dealer'],
 ];
 
 $db  = catalog_db();
