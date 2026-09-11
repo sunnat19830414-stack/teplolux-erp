@@ -270,6 +270,18 @@ class DolibarrApi
         return $this->put("thirdparties/{$id}", ['array_options' => $keyed]);
     }
 
+    // --- Сотрудники (контакты) контрагента, 11.09.2026 ---
+
+    /** Все сотрудники контрагента, включая ушедших (status 0). 404 «нет контактов» → пустой список. */
+    public function getThirdpartyContacts(int $socId): array
+    {
+        $r = $this->get('contacts?' . http_build_query(['thirdparty_ids' => $socId, 'limit' => 200, 'sortfield' => 't.lastname']));
+        return is_array($r) ? $r : [];
+    }
+    public function getContact(int $id) { return $this->get("contacts/{$id}"); }
+    public function createContact(array $data) { return $this->post('contacts', $data); }
+    public function updateContact(int $id, array $data) { return $this->put("contacts/{$id}", $data); }
+
     // --- Заказы поставщику ---
 
     /**
@@ -781,7 +793,7 @@ class DolibarrApi
         // multicurrency_code добавлен, чтобы отчёт по контракту мог показать валюту каждого заказа —
         // часть карточек поставщиков в EUR, и суммирование total_ttc "как есть" по заказам разных
         // валют без конвертации может вводить в заблуждение (см. отчёт аудита, "валюта в контрактах").
-        $q = http_build_query(['thirdparty_ids' => $socId, 'limit' => 500, 'properties' => 'id,ref,statut,total_ttc,date_commande,multicurrency_code,multicurrency_total_ttc']);
+        $q = http_build_query(['thirdparty_ids' => $socId, 'limit' => 500, 'properties' => 'id,ref,statut,total_ttc,date_commande,date_approve,date_valid,date_creation,multicurrency_code,multicurrency_total_ttc']);
         return $this->get('supplierorders?' . $q) ?? [];
     }
 

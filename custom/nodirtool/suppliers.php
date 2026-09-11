@@ -2,6 +2,7 @@
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/debt.php';   // сальдо по валютам (05.09.2026)
 require_once __DIR__ . '/includes/supplier_statement.php';
+require_once __DIR__ . '/includes/currency.php';
 
 // Те же счета списания, что и в "Оплата поставщикам"/"Перевозчики" — включая личную кассу закупщика.
 $moneyAccounts = [];
@@ -31,18 +32,75 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_SESSION['selected_supplier'] = null;
     } elseif ($action === 'save_contract') {
         $id = (int)($_POST['supplier_id'] ?? 0);
-        $amount = (float)($_POST['contract_amount'] ?? 0);
+        $amount = (float)str_replace([' ', ','], ['', '.'], (string)($_POST['contract_amount'] ?? 0));
         $start = trim($_POST['contract_start'] ?? '');
-        $ok = $api->updateThirdpartyExtrafields($id, [
-            'contract_amount' => $amount,
-            'contract_start' => $start !== '' ? strtotime($start) : null,
-        ]);
-        if ($ok === null) {
-            $message = 'Ошибка сохранения: ' . $api->lastError;
-            $messageType = 'err';
+        // «Уже выполнено до учёта в программе» (11.09.2026): работаем с поставщиком давно, а заказы
+        // здесь ведутся с сентября 2026 — без этой цифры контракт выглядел начатым с нуля.
+        $done = (float)str_replace([' ', ','], ['', '.'], (string)($_POST['contract_done_amount'] ?? 0));
+        $doneDate = trim($_POST['contract_done_date'] ?? '');
+        if ($done > 0 && $doneDate === '') $doneDate = date('Y-m-d');
+        if ($amount < 0 || $done < 0) {
+            $message = 'Суммы не могут быть отрицательными.'; $messageType = 'err';
+        } elseif ($done > 0 && $start !== '' && $doneDate < $start) {
+            $message = 'Дата «выполнено на» раньше начала контракта — проверьте даты.'; $messageType = 'err';
         } else {
-            $message = 'Данные по контракту сохранены.';
-            $messageType = 'ok';
+            $ok = $api->updateThirdpartyExtrafields($id, [
+                'contract_amount' => $amount,
+                'contract_start' => $start !== '' ? strtotime($start) : null,
+                'contract_done_amount' => $done > 0 ? $done : null,
+                'contract_done_date' => $done > 0 ? strtotime($doneDate) : null,
+            ]);
+            if ($ok === null) {
+                $message = 'Ошибка сохранения: ' . $api->lastError;
+                $messageType = 'err';
+            } else {
+                $_SESSION['_preserve_once']['selected_supplier'] = true;
+                flash_set('Данные по контракту сохранены.', 'ok');
+                header('Location: suppliers.php#contract');
+                exit;
+            }
+        }
+    } elseif ($action === 'save_contact' || $action === 'set_contact_status') {
+        // Сотрудники поставщика (11.09.2026) — штатные контакты Dolibarr, видны и в самом Dolibarr.
+        // Ушедшего не удаляем, а отмечаем «больше не работает»: в старой переписке и заказах он остаётся.
+        $sid = (int)($_POST['supplier_id'] ?? 0);
+        $cid = (int)($_POST['contact_id'] ?? 0);
+        $err = '';
+        if ($cid) {
+            $c = $api->getContact($cid);
+            if (!is_array($c) || (int)($c['socid'] ?? $c['fk_soc'] ?? 0) !== $sid) $err = 'Сотрудник не найден у этого поставщика.';
+        }
+        if (!$err && $action === 'set_contact_status') {
+            $on = !empty($_POST['active']) ? 1 : 0;
+            $r = $api->updateContact($cid, ['status' => $on, 'statut' => $on]);
+            if ($r === null) $err = 'Ошибка: ' . $api->lastError;
+            else $okMsg = $on ? 'Сотрудник снова в списке.' : 'Отмечен «больше не работает» — в списке ушедших.';
+        } elseif (!$err) {
+            $data = [
+                'lastname'     => trim((string)($_POST['lastname'] ?? '')),
+                'firstname'    => trim((string)($_POST['firstname'] ?? '')),
+                'poste'        => trim((string)($_POST['poste'] ?? '')),
+                'email'        => trim((string)($_POST['email'] ?? '')),
+                'phone_pro'    => trim((string)($_POST['phone_pro'] ?? '')),
+                'phone_mobile' => trim((string)($_POST['phone_mobile'] ?? '')),
+                'note_private' => trim((string)($_POST['note_private'] ?? '')),
+            ];
+            if ($data['lastname'] === '' && $data['firstname'] !== '') { $data['lastname'] = $data['firstname']; $data['firstname'] = ''; }
+            if ($data['lastname'] === '') $err = 'Укажите имя сотрудника.';
+            elseif ($data['email'] !== '' && !filter_var($data['email'], FILTER_VALIDATE_EMAIL)) $err = 'Почта записана с ошибкой: ' . $data['email'];
+            else {
+                if ($cid) $r = $api->updateContact($cid, $data);
+                else $r = $api->createContact($data + ['socid' => $sid, 'status' => 1, 'statut' => 1]);
+                if ($r === null) $err = 'Ошибка сохранения: ' . $api->lastError;
+                else $okMsg = $cid ? 'Данные сотрудника сохранены.' : 'Сотрудник добавлен.';
+            }
+        }
+        if ($err) { $message = $err; $messageType = 'err'; }
+        else {
+            $_SESSION['_preserve_once']['selected_supplier'] = true;
+            flash_set($okMsg, 'ok');
+            header('Location: suppliers.php#staff');
+            exit;
         }
     } elseif ($action === 'upload_document' || $action === 'delete_document') {
         // Документы поставщика — контракт, допсоглашения, спецификации (пункт B3 отчёта
@@ -145,38 +203,53 @@ if ($_SESSION['selected_supplier']) {
         $opts = $soc['array_options'] ?? [];
         $contractAmount = (float)($opts['options_contract_amount'] ?? 0);
         $contractStartTs = !empty($opts['options_contract_start']) ? (int)$opts['options_contract_start'] : null;
+        // Валюта контракта — родное поле Dolibarr (форма поставщика пишет туда), доп.поле — запасное.
+        $contractCur = strtoupper((string)($soc['multicurrency_code'] ?? ''))
+                       ?: (strtoupper((string)($opts['options_contract_currency'] ?? '')) ?: 'USD');
+        $doneAmount = (float)($opts['options_contract_done_amount'] ?? 0);
+        $doneTs = !empty($opts['options_contract_done_date']) ? (int)$opts['options_contract_done_date'] : null;
+        $contractRate = $contractCur === 'USD' ? 1.0 : dolibarr_currency_rate($contractCur);
 
-        $spent = 0.0;
-        $spentByCur = [];   // 05.09.2026: считаем в валюте заказа, а не всё скопом в долларах
+        // 11.09.2026: выполнение считается В ВАЛЮТЕ КОНТРАКТА. Раньше суммировались доллары и
+        // сравнивались с суммой контракта как есть — у CALEFFI контракт 100 000 € сравнивался с
+        // долларами. Заказ в валюте контракта берётся как есть, в другой — через доллары по курсу Dolibarr.
+        $spent = 0.0;          // заказы в программе, в валюте контракта
+        $spentByCur = [];
         $orderCount = 0;
         $contractOrders = [];
         $currencies = [];
+        $converted = false;
         if ($contractAmount > 0 && $contractStartTs) {
             $orders = $api->getSupplierOrdersForSupplier($id);
             if (is_array($orders)) {
                 foreach ($orders as $o) {
                     $statut = (int)($o['statut'] ?? 0);
-                    $date = (int)($o['date_commande'] ?? 0);
-                    // считаем заказы, дошедшие хотя бы до "утверждён" (2+), с даты начала контракта
-                    if ($statut >= 2 && $statut <= 5 && $date >= $contractStartTs) {
-                        $currency = strtoupper((string)($o['multicurrency_code'] ?: 'USD'));
-                        $totalNative = $currency === 'USD'
-                            ? (float)($o['total_ttc'] ?? 0)
-                            : (float)($o['multicurrency_total_ttc'] ?? $o['total_ttc'] ?? 0);
-                        $spent += (float)($o['total_ttc'] ?? 0);   // доллары — для полосы заполнения
-                        $spentByCur[$currency] = ($spentByCur[$currency] ?? 0) + $totalNative;
-                        $orderCount++;
-                        $currencies[$currency] = true;
-                        $contractOrders[] = [
-                            'ref' => $o['ref'] ?? '',
-                            'date' => $date ? date('d.m.Y', $date) : '',
-                            'total_ttc' => $totalNative,
-                            'currency' => $currency,
-                        ];
-                    }
+                    // Дата заказа: у утверждённого, но ещё не отправленного её нет — берём дату
+                    // утверждения/проведения/создания, иначе такие заказы в контракт не попадали.
+                    $date = (int)($o['date_commande'] ?: ($o['date_approve'] ?: ($o['date_valid'] ?: ($o['date_creation'] ?? 0))));
+                    if ($statut < 2 || $statut > 5 || $date < $contractStartTs) continue;
+                    // что было до «выполнено на» — уже входит в введённую вручную сумму
+                    if ($doneTs && date('Y-m-d', $date) <= date('Y-m-d', $doneTs)) continue;
+                    $currency = strtoupper((string)($o['multicurrency_code'] ?: 'USD'));
+                    $totalNative = $currency === 'USD'
+                        ? (float)($o['total_ttc'] ?? 0)
+                        : (float)($o['multicurrency_total_ttc'] ?? $o['total_ttc'] ?? 0);
+                    if ($currency === $contractCur) $inContract = $totalNative;
+                    else { $inContract = $contractRate ? (float)($o['total_ttc'] ?? 0) * $contractRate : 0.0; $converted = true; }
+                    $spent += $inContract;
+                    $spentByCur[$currency] = ($spentByCur[$currency] ?? 0) + $totalNative;
+                    $orderCount++;
+                    $currencies[$currency] = true;
+                    $contractOrders[] = [
+                        'ref' => $o['ref'] ?? '',
+                        'date' => $date ? date('d.m.Y', $date) : '',
+                        'total_ttc' => $totalNative,
+                        'currency' => $currency,
+                    ];
                 }
             }
         }
+        $fulfilled = $doneAmount + $spent;
 
         $detail = [
             'id' => $id,
@@ -189,13 +262,16 @@ if ($_SESSION['selected_supplier']) {
             'contract_start' => $contractStartTs ? date('Y-m-d', $contractStartTs) : '',
             'spent' => $spent,
             'spent_by_currency' => $spentByCur,
+            'done_amount' => $doneAmount,
+            'done_date' => $doneTs ? date('Y-m-d', $doneTs) : '',
+            'fulfilled' => $fulfilled,
+            'converted' => $converted,
             // Валюта контракта. Форма поставщика сохраняет её в родное поле Dolibarr
             // (multicurrency_code), поэтому берём сначала его, а доп.поле — как запасной вариант.
             // Раньше читалось только доп.поле, и карточка контракта всегда показывала доллары,
             // какую бы валюту ни выбрали (та же ошибка, что нашёл Абдурашид у перевозчиков).
-            'contract_currency' => strtoupper((string)($soc['multicurrency_code'] ?? ''))
-                                   ?: (strtoupper((string)($opts['options_contract_currency'] ?? '')) ?: 'USD'),
-            'remaining' => $contractAmount - $spent,
+            'contract_currency' => $contractCur,
+            'remaining' => $contractAmount - $fulfilled,
             'order_count' => $orderCount,
             'orders' => $contractOrders,
             // Сумма контракта считается в предположении USD — если заказы были в разных валютах, сумма
@@ -207,6 +283,7 @@ if ($_SESSION['selected_supplier']) {
             'phone' => (string)($soc['phone'] ?? ''),
             'contact_person' => (string)($opts['options_contact_person'] ?? ''),
             'country' => (string)($soc['country'] ?? ''),
+            'contacts' => $api->getThirdpartyContacts($id),
             'currency' => (string)($soc['multicurrency_code'] ?? ''),
         ];
 
@@ -253,7 +330,7 @@ require __DIR__ . '/includes/layout_top.php';
             <?php if ($detail['currency'] !== '' && $detail['currency'] !== 'USD'): ?>
               · договор в <?= htmlspecialchars($detail['currency']) ?>
             <?php endif; ?>
-            <?php if ($detail['contact_person'] === '' && $detail['email'] === ''): ?>
+            <?php if ($detail['contact_person'] === '' && $detail['email'] === '' && !$detail['contacts']): ?>
               <span style="color:var(--warn)">Почта и контактное лицо не заполнены — добавьте, чтобы не искать в переписке.</span>
             <?php endif; ?>
           </div>
@@ -272,6 +349,95 @@ require __DIR__ . '/includes/layout_top.php';
     <p style="margin-top:8px"><a href="supplier_form.php?ctx=suppliers" class="btn secondary small">+ Новый поставщик</a></p>
   <?php endif; ?>
 </div>
+
+<?php if ($detail):
+    $staffActive = array_values(array_filter($detail['contacts'], fn($c) => (int)($c['status'] ?? $c['statut'] ?? 1) === 1));
+    $staffGone = array_values(array_filter($detail['contacts'], fn($c) => (int)($c['status'] ?? $c['statut'] ?? 1) !== 1));
+    $staffForm = function (?array $c) use ($detail) { ob_start(); ?>
+      <form method="post">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="save_contact">
+        <input type="hidden" name="supplier_id" value="<?= $detail['id'] ?>">
+        <input type="hidden" name="contact_id" value="<?= (int)($c['id'] ?? 0) ?>">
+        <div class="row">
+          <div><label>Имя</label><input type="text" name="firstname" value="<?= htmlspecialchars($c['firstname'] ?? '') ?>"></div>
+          <div><label>Фамилия</label><input type="text" name="lastname" value="<?= htmlspecialchars($c['lastname'] ?? '') ?>"></div>
+          <div><label>Должность</label><input type="text" name="poste" value="<?= htmlspecialchars($c['poste'] ?? '') ?>" placeholder="менеджер, бухгалтер, логист…"></div>
+        </div>
+        <div class="row">
+          <div><label>Почта</label><input type="email" name="email" value="<?= htmlspecialchars($c['email'] ?? '') ?>"></div>
+          <div><label>Телефон</label><input type="text" name="phone_pro" value="<?= htmlspecialchars($c['phone_pro'] ?? '') ?>"></div>
+          <div><label>Мобильный / WhatsApp</label><input type="text" name="phone_mobile" value="<?= htmlspecialchars($c['phone_mobile'] ?? '') ?>"></div>
+        </div>
+        <div><label>Заметка</label><input type="text" name="note_private" value="<?= htmlspecialchars($c['note_private'] ?? '') ?>" placeholder="за что отвечает, на каком языке писать…"></div>
+        <button type="submit"><?= $c ? 'Сохранить' : 'Добавить сотрудника' ?></button>
+      </form>
+    <?php return ob_get_clean(); };
+?>
+<div class="card" id="staff">
+  <h2>Сотрудники поставщика (<?= count($staffActive) ?>)</h2>
+  <?php if (!$staffActive): ?>
+    <p class="muted">Пока никого. Добавьте менеджера, бухгалтера, логиста — кому писать по заказам, оплате и отгрузке.</p>
+  <?php else: ?>
+    <table>
+      <thead><tr><th>Кто</th><th>Должность</th><th>Почта</th><th>Телефон</th><th></th></tr></thead>
+      <tbody>
+      <?php foreach ($staffActive as $c):
+            $cn = trim(($c['firstname'] ?? '') . ' ' . ($c['lastname'] ?? ''));
+            $ph = array_filter([$c['phone_pro'] ?? '', $c['phone_mobile'] ?? '']); ?>
+        <tr>
+          <td><strong><?= htmlspecialchars($cn) ?></strong>
+            <?php if (!empty($c['note_private'])): ?><div class="muted" style="font-size:12px"><?= htmlspecialchars($c['note_private']) ?></div><?php endif; ?></td>
+          <td><?= htmlspecialchars($c['poste'] ?? '') ?></td>
+          <td><?php if (!empty($c['email'])): ?><a href="mailto:<?= htmlspecialchars($c['email']) ?>"><?= htmlspecialchars($c['email']) ?></a><?php endif; ?></td>
+          <td style="white-space:nowrap"><?= htmlspecialchars(implode(', ', $ph)) ?></td>
+          <td style="white-space:nowrap">
+            <details style="display:inline-block"><summary class="muted" style="cursor:pointer">✏️</summary>
+              <div style="min-width:560px; margin-top:8px"><?= $staffForm($c) ?></div></details>
+            <form method="post" style="display:inline" onsubmit="return appConfirmSubmit(this, 'Отметить, что <?= htmlspecialchars(addslashes($cn), ENT_QUOTES) ?> больше не работает у поставщика? Он уйдёт в список ушедших, данные сохранятся.');">
+              <?= csrf_field() ?>
+              <input type="hidden" name="action" value="set_contact_status">
+              <input type="hidden" name="supplier_id" value="<?= $detail['id'] ?>">
+              <input type="hidden" name="contact_id" value="<?= (int)$c['id'] ?>">
+              <input type="hidden" name="active" value="0">
+              <button type="submit" class="secondary small" title="Больше не работает">🚪</button>
+            </form>
+          </td>
+        </tr>
+      <?php endforeach; ?>
+      </tbody>
+    </table>
+  <?php endif; ?>
+  <details style="margin-top:12px"<?= $staffActive ? '' : ' open' ?>>
+    <summary style="cursor:pointer; font-weight:600">+ Добавить сотрудника</summary>
+    <div style="margin-top:10px"><?= $staffForm(null) ?></div>
+  </details>
+  <?php if ($staffGone): ?>
+    <details style="margin-top:8px">
+      <summary class="muted" style="cursor:pointer">Больше не работают (<?= count($staffGone) ?>)</summary>
+      <table style="margin-top:6px">
+        <?php foreach ($staffGone as $c): ?>
+          <tr class="muted">
+            <td><?= htmlspecialchars(trim(($c['firstname'] ?? '') . ' ' . ($c['lastname'] ?? ''))) ?></td>
+            <td><?= htmlspecialchars($c['poste'] ?? '') ?></td>
+            <td><?= htmlspecialchars($c['email'] ?? '') ?></td>
+            <td>
+              <form method="post" style="display:inline">
+                <?= csrf_field() ?>
+                <input type="hidden" name="action" value="set_contact_status">
+                <input type="hidden" name="supplier_id" value="<?= $detail['id'] ?>">
+                <input type="hidden" name="contact_id" value="<?= (int)$c['id'] ?>">
+                <input type="hidden" name="active" value="1">
+                <button type="submit" class="secondary small">Вернуть в список</button>
+              </form>
+            </td>
+          </tr>
+        <?php endforeach; ?>
+      </table>
+    </details>
+  <?php endif; ?>
+</div>
+<?php endif; ?>
 
 <?php if ($detail): ?>
 <div class="card">
@@ -312,38 +478,61 @@ require __DIR__ . '/includes/layout_top.php';
   </form>
 </div>
 
-<div class="card">
+<div class="card" id="contract">
   <h2>Годовой контракт</h2>
-  <form method="post" class="row" style="align-items:end">
+  <?php $cc = $detail['contract_currency']; $ccl = currency_label($cc); ?>
+  <form method="post">
   <?= csrf_field() ?>
     <input type="hidden" name="action" value="save_contract">
     <input type="hidden" name="supplier_id" value="<?= $detail['id'] ?>">
-    <div>
-      <label>Сумма контракта, $</label>
-      <input type="number" step="0.01" min="0" name="contract_amount" value="<?= $detail['contract_amount'] ?: '' ?>">
+    <div class="row" style="align-items:end">
+      <div>
+        <label>Сумма контракта, <?= htmlspecialchars($ccl) ?></label>
+        <input type="number" step="0.01" min="0" name="contract_amount" value="<?= $detail['contract_amount'] ?: '' ?>">
+      </div>
+      <div>
+        <label>Начало периода</label>
+        <input type="date" name="contract_start" value="<?= htmlspecialchars($detail['contract_start']) ?>">
+      </div>
     </div>
-    <div>
-      <label>Начало периода</label>
-      <input type="date" name="contract_start" value="<?= htmlspecialchars($detail['contract_start']) ?>">
+    <div class="row" style="align-items:end">
+      <div>
+        <label>Уже выполнено до учёта в программе, <?= htmlspecialchars($ccl) ?></label>
+        <input type="number" step="0.01" min="0" name="contract_done_amount" value="<?= $detail['done_amount'] ?: '' ?>" placeholder="0">
+      </div>
+      <div>
+        <label>На дату</label>
+        <input type="date" name="contract_done_date" value="<?= htmlspecialchars($detail['done_date']) ?>">
+      </div>
     </div>
-    <div style="flex:0"><button type="submit">Сохранить</button></div>
+    <p class="muted" style="margin-top:-4px">Сколько закупили по этому контракту раньше — по сверке с поставщиком,
+      1С или SAP. Заказы из программы <strong>после этой даты</strong> прибавятся сами; всё, что было до неё,
+      должно входить в эту сумму. Если вели всё здесь с начала контракта — оставьте пустым.</p>
+    <button type="submit">Сохранить</button>
   </form>
 
-  <?php if ($detail['contract_amount'] > 0 && $detail['contract_start']): ?>
-    <p>Закуплено с <?= date('d.m.Y', strtotime($detail['contract_start'])) ?>:
-      <strong><?= htmlspecialchars(money_by_currency($detail['spent_by_currency'], $detail['contract_currency'])) ?></strong>
-      из <strong><?= htmlspecialchars(money($detail['contract_amount'], $detail['contract_currency'])) ?></strong>
-      (<?= $detail['order_count'] ?> заказ(ов))</p>
+  <?php if ($detail['contract_amount'] > 0 && $detail['contract_start']):
+        $pct = $detail['contract_amount'] > 0 ? $detail['fulfilled'] / $detail['contract_amount'] * 100 : 0; ?>
+    <p style="margin-top:14px">Выполнено: <strong><?= htmlspecialchars(money($detail['fulfilled'], $cc)) ?></strong>
+      из <strong><?= htmlspecialchars(money($detail['contract_amount'], $cc)) ?></strong>
+      (<?= number_format($pct, 1) ?>%)</p>
+    <?php if ($detail['done_amount'] > 0): ?>
+      <p class="muted" style="margin-top:-6px">
+        до учёта в программе (на <?= date('d.m.Y', strtotime($detail['done_date'])) ?>): <?= htmlspecialchars(money($detail['done_amount'], $cc)) ?>
+        + заказы в программе после этой даты: <?= htmlspecialchars(money($detail['spent'], $cc)) ?> (<?= $detail['order_count'] ?>)</p>
+    <?php else: ?>
+      <p class="muted" style="margin-top:-6px">заказы в программе с <?= date('d.m.Y', strtotime($detail['contract_start'])) ?>: <?= $detail['order_count'] ?></p>
+    <?php endif; ?>
     <div class="contract-bar">
-      <div class="contract-bar-fill <?= $detail['remaining'] < 0 ? 'over' : '' ?>" style="width: <?= min(100, max(0, $detail['contract_amount'] > 0 ? ($detail['spent'] / $detail['contract_amount'] * 100) : 0)) ?>%"></div>
+      <div class="contract-bar-fill <?= $detail['remaining'] < 0 ? 'over' : '' ?>" style="width: <?= min(100, max(0, $pct)) ?>%"></div>
     </div>
     <p class="<?= $detail['remaining'] < 0 ? 'err' : 'ok' ?>">
       <?= $detail['remaining'] < 0
-            ? 'Контракт превышен на ' . htmlspecialchars(money(abs($detail['remaining']), $detail['contract_currency']))
-            : 'Осталось по контракту: ' . htmlspecialchars(money($detail['remaining'], $detail['contract_currency'])) ?>
+            ? 'Контракт превышен на ' . htmlspecialchars(money(abs($detail['remaining']), $cc))
+            : 'Осталось по контракту: ' . htmlspecialchars(money($detail['remaining'], $cc)) ?>
     </p>
-    <?php if ($detail['mixed_currency']): ?>
-      <p class="warn">Внимание: заказы в этот период оформлены в РАЗНЫХ валютах — сумма выше сложена "как есть", без конвертации. Смотрите валюту каждого заказа в списке ниже.</p>
+    <?php if ($detail['converted']): ?>
+      <p class="warn">Часть заказов оформлена не в <?= htmlspecialchars($cc) ?> — они пересчитаны в <?= htmlspecialchars($cc) ?> по курсу Dolibarr, это приблизительно.</p>
     <?php endif; ?>
     <?php if (!empty($detail['orders'])): ?>
       <table style="margin-top:10px">
@@ -358,7 +547,7 @@ require __DIR__ . '/includes/layout_top.php';
       </table>
     <?php endif; ?>
   <?php else: ?>
-    <p class="muted">Заполните сумму и дату начала, чтобы видеть остаток по контракту.</p>
+    <p class="muted">Заполните сумму и дату начала, чтобы видеть выполнение и остаток по контракту.</p>
   <?php endif; ?>
 </div>
 
