@@ -301,6 +301,7 @@ require __DIR__ . '/includes/layout_top.php';
   <?php if ($left > 0.01): ?>
   <div class="card">
     <h2>Оплатить рейс</h2>
+    <script src="assets/debt_calc.js?v=20260911b"></script>
     <p class="muted">Перевозчик и валюта долга уже известны из рейса. Осталось оплатить:
       <strong><?= htmlspecialchars(money($left, $debtCur)) ?></strong>.</p>
     <form method="post" id="payShipForm">
@@ -315,9 +316,8 @@ require __DIR__ . '/includes/layout_top.php';
       ?>
       <div id="debtBox" style="display:none">
         <label>Сколько <?= htmlspecialchars($debtCur) ?> этим закрыто</label>
-        <input type="number" step="0.01" min="0.01" name="debt_amount" id="debtAmt" value="<?= $left ?>">
-        <p class="muted" style="margin-top:-4px">Платите не в <?= htmlspecialchars($debtCur) ?> — укажите, какую часть долга
-          в <?= htmlspecialchars($debtCur) ?> закрывает эта оплата (по договорённости с перевозчиком).</p>
+        <input type="number" step="0.01" min="0.01" name="debt_amount" id="debtAmt">
+        <p class="muted" style="margin-top:-4px" id="debtHint"></p>
       </div>
       <label>Комментарий (необязательно)</label>
       <input type="text" name="pay_comment" placeholder="например: наличными водителю">
@@ -328,14 +328,9 @@ require __DIR__ . '/includes/layout_top.php';
       const sel = document.getElementById('payAccP'), amt = document.getElementById('payAmtP');
       const box = document.getElementById('debtBox'), debt = document.getElementById('debtAmt');
       const debtCur = <?= json_encode($debtCur) ?>, left = <?= json_encode($left) ?>;
-      function sync() {
-        const same = sel.options[sel.selectedIndex].dataset.cur === debtCur;
-        box.style.display = same ? 'none' : '';
-        debt.required = !same;
-        // в той же валюте подставляем остаток сразу — чаще всего платят его целиком
-        if (same && !amt.value) amt.value = left;
-      }
-      sel.addEventListener('change', sync); sync();
+      const refRate = <?= json_encode($debtCur === 'USD' ? 1.0 : (float)($selected['rate'] ?? 0)) ?>;
+      nt_debt_calc({acc: sel, amt: amt, rate: document.getElementById('payRateP'), box: box, debt: debt,
+                    hint: document.getElementById('debtHint'), cur: () => debtCur, ref: () => refRate, left: () => left});
     })();
     </script>
   </div>

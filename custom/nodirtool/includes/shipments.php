@@ -472,7 +472,7 @@ function shipments_for_orders(array $orderIds): array
  */
 function carrier_pay(int $carrierId, int $accountId, string $accountCurrency, float $bankAmount, ?float $bankRate,
                      string $debtCurrency, float $debtAmount, string $who, string $comment = '',
-                     ?int $shipmentId = null): array
+                     ?int $shipmentId = null, ?float $debtRefRate = null): array
 {
     $accountCurrency = strtoupper($accountCurrency);
     $debtCurrency = strtoupper($debtCurrency) ?: 'USD';
@@ -484,6 +484,27 @@ function carrier_pay(int $carrierId, int $accountId, string $accountCurrency, fl
     if ($debtAmount <= 0) return ['ok' => false, 'error' => "Укажите, сколько {$debtCurrency} этим закрыто."];
     if ($accountCurrency !== 'USD' && (!$bankRate || $bankRate <= 0))
         return ['ok' => false, 'error' => "Укажите курс {$accountCurrency} за 1 \$."];
+
+    // Проверка на разумность (11.09.2026). Первая же живая оплата: 2 000 $ закрыли 3 500 € — форма
+    // подставила полный остаток, а человек платил частично. По курсу рейса это 1 720 €. Сравниваем
+    // обе суммы в долларах: списанное — по курсу счёта, закрытое — по курсу рейса (или Dolibarr).
+    // Допуск 15%: договорной курс наличных отличается на проценты, а не в разы.
+    if ($accountCurrency !== $debtCurrency) {
+        $refA = $accountCurrency === 'USD' ? 1.0 : (float)$bankRate;
+        $refD = $debtCurrency === 'USD' ? 1.0 : (float)$debtRefRate;
+        if ($refA > 0 && $refD > 0) {
+            $usdPaid = $bankAmount / $refA;
+            $usdClosed = $debtAmount / $refD;
+            if (abs($usdPaid / $usdClosed - 1) > 0.15) {
+                $expected = round($usdPaid * $refD, 2);
+                return ['ok' => false, 'error' =>
+                    'Проверьте суммы: ' . money($bankAmount, $accountCurrency) . ' не могут закрыть ' . money($debtAmount, $debtCurrency) .
+                    ' — по курсу ' . rtrim(rtrim(number_format($refD, 4, '.', ''), '0'), '.') . " {$debtCurrency} за 1 \$ это примерно " .
+                    money($expected, $debtCurrency) . '. Если оплата частичная, в поле «Сколько ' . $debtCurrency .
+                    ' этим закрыто» укажите только закрытую часть.'];
+            }
+        }
+    }
 
     // долларовый эквивалент — для сводок; берём с той стороны, где есть доллары
     $usd = $accountCurrency === 'USD' ? $bankAmount
@@ -545,7 +566,8 @@ function shipment_pay(int $shipmentId, int $accountId, string $accountCurrency, 
                    ' — больше закрыть нельзя. Если перевозчик выставил другую сумму, сначала запишите его инвойс.'];
 
         $r = carrier_pay((int)$s['fk_carrier'], $accountId, $accountCurrency, $bankAmount, $bankRate,
-                         $debtCur, $debtAmount, $who, $comment, $shipmentId);
+                         $debtCur, $debtAmount, $who, $comment, $shipmentId,
+                         $s['rate'] !== null ? (float)$s['rate'] : null);
         if (!empty($r['ok'])) {
             $leftAfter = round($left - $r['debt_amount'], 2);
             $r['message'] .= ' ' . ($leftAfter > 0.01 ? 'По рейсу осталось ' . money($leftAfter, $debtCur) . '.' : 'Рейс оплачен полностью.');

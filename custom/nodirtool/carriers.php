@@ -60,7 +60,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // «в общий долг» — валюту долга выбирает человек из тех, в которых перевозчик должен
             $debtCur = strtoupper(trim((string)($_POST['debt_currency'] ?? ''))) ?: $pay['currency'];
             $r = carrier_pay($carrierId, $pay['account'], $pay['currency'], $pay['amount'], $pay['rate'],
-                             $debtCur, $debtAmount, $who, $comment, null);
+                             $debtCur, $debtAmount, $who, $comment, null,
+                             $debtCur === 'USD' ? 1.0 : expense_default_rate(logistics_db(), $debtCur));
         }
         {
             if (!($r['ok'] ?? false)) {
@@ -285,7 +286,8 @@ require __DIR__ . '/includes/layout_top.php';
           <?php foreach ($openShipments as $sh):
                 $shDue = (float)($sh['invoice_amount'] ?? $sh['agreed_amount']);
                 $shLeft = round($shDue - (float)$sh['paid_native'], 2); ?>
-            <option value="<?= (int)$sh['rowid'] ?>" data-cur="<?= htmlspecialchars(strtoupper($sh['currency'])) ?>" data-left="<?= $shLeft ?>">
+            <option value="<?= (int)$sh['rowid'] ?>" data-cur="<?= htmlspecialchars(strtoupper($sh['currency'])) ?>" data-left="<?= $shLeft ?>"
+                    data-ref="<?= strtoupper($sh['currency']) === 'USD' ? 1 : (float)$sh['rate'] ?>">
               №<?= (int)$sh['rowid'] ?> <?= htmlspecialchars(trim($sh['route_from'] . ' → ' . $sh['route_to'], ' →')) ?>
               · осталось <?= htmlspecialchars(money($shLeft, $sh['currency'])) ?>
             </option>
@@ -296,7 +298,8 @@ require __DIR__ . '/includes/layout_top.php';
         <label>Какой долг закрываем</label>
         <select name="debt_currency" id="cpDebtCur">
           <?php foreach ($debtByCur as $c => $v): ?>
-            <option value="<?= htmlspecialchars($c) ?>" data-left="<?= round($v, 2) ?>"><?= htmlspecialchars($c) ?> — долг <?= htmlspecialchars(money($v, $c)) ?></option>
+            <option value="<?= htmlspecialchars($c) ?>" data-left="<?= round($v, 2) ?>"
+                    data-ref="<?= $c === 'USD' ? 1 : (float)(expense_default_rate(logistics_db(), $c) ?? 0) ?>"><?= htmlspecialchars($c) ?> — долг <?= htmlspecialchars(money($v, $c)) ?></option>
           <?php endforeach; ?>
           <?php if (!$debtByCur): ?><option value="">(долга нет)</option><?php endif; ?>
         </select>
@@ -305,33 +308,27 @@ require __DIR__ . '/includes/layout_top.php';
     <div id="cpDebtBox" style="display:none">
       <label>Сколько <span id="cpDebtCurLbl"></span> этим закрыто</label>
       <input type="number" step="0.01" min="0.01" name="debt_amount" id="cpDebtAmt">
-      <p class="muted" style="margin-top:-4px">Платите не в валюте долга — укажите, какую часть долга эта оплата закрывает
-        (по договорённости с перевозчиком). Иначе долг покажется в двух валютах сразу.</p>
+      <p class="muted" style="margin-top:-4px" id="cpDebtHint"></p>
     </div>
     <div><label>Комментарий (необязательно)</label><input type="text" name="comment"></div>
     <button type="submit">Оплатить</button>
   </form>
+  <script src="assets/debt_calc.js?v=20260911b"></script>
   <script>
   (function () {
-    const acc = document.getElementById('payAccC'), amt = document.getElementById('payAmtC');
     const ship = document.getElementById('cpShip'), curBox = document.getElementById('cpDebtCurBox');
-    const curSel = document.getElementById('cpDebtCur'), box = document.getElementById('cpDebtBox');
-    const debt = document.getElementById('cpDebtAmt'), lbl = document.getElementById('cpDebtCurLbl');
-    function o(sel) { return sel.options[sel.selectedIndex] || {dataset: {}}; }
-    function sync() {
-      const byShip = !!ship.value;
-      curBox.style.display = byShip ? 'none' : '';
-      const debtCur = byShip ? o(ship).dataset.cur : curSel.value;
-      const left = parseFloat(byShip ? o(ship).dataset.left : o(curSel).dataset.left) || '';
-      const same = !debtCur || o(acc).dataset.cur === debtCur;
-      box.style.display = same ? 'none' : '';
-      debt.required = !same;
-      lbl.textContent = debtCur || '';
-      if (!same && !debt.value && left) debt.value = left;
-      if (same && !amt.value && left) amt.value = left;
-    }
-    [acc, ship, curSel].forEach(e => e.addEventListener('change', () => { debt.value = ''; sync(); }));
-    sync();
+    const curSel = document.getElementById('cpDebtCur');
+    const o = sel => sel.options[sel.selectedIndex] || {dataset: {}};
+    const byShip = () => !!ship.value;
+    const calc = nt_debt_calc({acc: document.getElementById('payAccC'), amt: document.getElementById('payAmtC'),
+      rate: document.getElementById('payRateC'), box: document.getElementById('cpDebtBox'),
+      debt: document.getElementById('cpDebtAmt'), hint: document.getElementById('cpDebtHint'),
+      cur:  () => byShip() ? o(ship).dataset.cur : curSel.value,
+      ref:  () => parseFloat(byShip() ? o(ship).dataset.ref : o(curSel).dataset.ref) || 0,
+      left: () => parseFloat(byShip() ? o(ship).dataset.left : o(curSel).dataset.left) || 0,
+      label: document.getElementById('cpDebtCurLbl')});
+    function sync() { curBox.style.display = byShip() ? 'none' : ''; calc.reset(); }
+    ship.addEventListener('change', sync); curSel.addEventListener('change', sync); sync();
   })();
   </script>
 </div>
