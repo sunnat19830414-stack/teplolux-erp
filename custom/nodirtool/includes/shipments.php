@@ -451,3 +451,120 @@ function shipments_for_orders(array $orderIds): array
     }
     return $out;
 }
+
+/**
+ * Оплата конкретного рейса (11.09.2026, замечание пользователя: «хочу оплатить фрахт — система
+ * даёт выбрать транспортную компанию, хотя заказ уже привязан к перевозчику»).
+ *
+ * Перевозчик, валюта и сумма известны из рейса — выбирать их заново не нужно.
+ *
+ * ⚠️ Главное здесь — валюта. Долг перевозчику считается в валюте договорённости (debt.php), и
+ * оплата должна уменьшать долг В ЭТОЙ ЖЕ ВАЛЮТЕ. Раньше оплата записывалась в валюте счёта списания:
+ * заплатили за рейс в 3 500 EUR долларами из кассы — и долг показывался как «должны 3 500 EUR и
+ * переплатили 4 070 USD» вместо «долга нет». Поэтому две суммы:
+ *   $bankAmount — сколько реально ушло со счёта, в валюте счёта (проводка в банке/кассе);
+ *   $debtAmount — сколько этим закрыто долга, в валюте рейса (строка оплаты перевозчику).
+ * Если валюты совпадают, это одно и то же число.
+ *
+ * $bankRate — «единиц валюты счёта за 1 $», нужен для долларового эквивалента, если счёт не в долларах.
+ */
+function shipment_pay(int $shipmentId, int $accountId, string $accountCurrency, float $bankAmount,
+                      ?float $bankRate, float $debtAmount, string $who, string $comment = ''): array
+{
+    require_once __DIR__ . '/named_lock.php';
+    return with_named_lock('shipment_pay_' . $shipmentId, function () use (
+        $shipmentId, $accountId, $accountCurrency, $bankAmount, $bankRate, $debtAmount, $who, $comment) {
+
+        $s = shipment_get($shipmentId);
+        if (!$s) return ['ok' => false, 'error' => 'Рейс не найден.'];
+        $debtCur = strtoupper((string)$s['currency']) ?: 'USD';
+        $accountCurrency = strtoupper($accountCurrency);
+        if ($accountCurrency === $debtCur) $debtAmount = $bankAmount;   // одна валюта — одно число
+
+        $bankAmount = round($bankAmount, 2);
+        $debtAmount = round($debtAmount, 2);
+        if ($bankAmount <= 0) return ['ok' => false, 'error' => 'Укажите, сколько списано со счёта.'];
+        if ($debtAmount <= 0) return ['ok' => false, 'error' => "Укажите, сколько {$debtCur} этим закрыто."];
+        if ($accountCurrency !== 'USD' && (!$bankRate || $bankRate <= 0))
+            return ['ok' => false, 'error' => "Укажите курс {$accountCurrency} за 1 \$."];
+
+        // остаток по рейсу — под той же блокировкой, иначе двойное нажатие оплатит дважды
+        $due = $s['invoice_amount'] !== null ? (float)$s['invoice_amount'] : (float)$s['agreed_amount'];
+        $left = round($due - shipment_paid($shipmentId), 2);
+        if ($debtAmount > $left + 0.01)
+            return ['ok' => false, 'error' => 'По рейсу осталось оплатить ' . money($left, $debtCur) .
+                   ' — больше закрыть нельзя. Если перевозчик выставил другую сумму, сначала запишите его инвойс.'];
+
+        $usd = $accountCurrency === 'USD' ? $bankAmount
+             : ($debtCur === 'USD' ? $debtAmount : round($bankAmount / $bankRate, 2));
+
+        $db = logistics_db();
+        $bal = (float)$db->query("SELECT COALESCE(SUM(amount),0) b FROM llx_bank WHERE fk_account=" . (int)$accountId)->fetch_assoc()['b'];
+        $warn = $bankAmount > $bal + 0.01
+            ? 'ВНИМАНИЕ: на счету было ' . number_format($bal, 2, '.', ' ') . ' — после этой оплаты счёт ушёл в минус. ' : '';
+
+        $carrierId = (int)$s['fk_carrier'];
+        $label = "Оплата перевозчику #{$carrierId}, рейс #{$shipmentId} ({$who})";
+        $now = date('Y-m-d H:i:s'); $today = date('Y-m-d');
+        $db->begin_transaction();
+        try {
+            $st = $db->prepare("INSERT INTO llx_bank (datec, dateo, datev, amount, label, fk_account, fk_type, fk_user_author, rappro)
+                                VALUES (?, ?, ?, ?, ?, ?, 'VIR', ?, 0)");
+            $neg = -$bankAmount; $uid = LOGISTICS_API_USER_ID;
+            $st->bind_param('sssdsii', $now, $today, $today, $neg, $label, $accountId, $uid);
+            $st->execute(); $bankId = (int)$db->insert_id; $st->close();
+
+            $st = $db->prepare("INSERT INTO llx_carrier_payment
+                (fk_carrier, native_amount, native_currency, rate, usd_amount, fk_bank, datec, fk_user, comment, fk_shipment)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $fullComment = trim($comment . ($accountCurrency !== $debtCur
+                ? " [списано {$bankAmount} {$accountCurrency} за {$debtAmount} {$debtCur}]" : ''));
+            $st->bind_param('idsddisisi', $carrierId, $debtAmount, $debtCur, $bankRate, $usd, $bankId, $now, $uid, $fullComment, $shipmentId);
+            $st->execute(); $st->close();
+            $db->commit();
+        } catch (Throwable $e) {
+            $db->rollback();
+            return ['ok' => false, 'error' => 'Оплата не записана: ' . $e->getMessage()];
+        }
+        $leftAfter = round($left - $debtAmount, 2);
+        return ['ok' => true, 'warning' => $warn,
+                'message' => 'Оплачено ' . money($bankAmount, $accountCurrency) .
+                             ($accountCurrency !== $debtCur ? ' — закрыто ' . money($debtAmount, $debtCur) : '') . '. ' .
+                             ($leftAfter > 0.01 ? 'По рейсу осталось ' . money($leftAfter, $debtCur) . '.' : 'Рейс оплачен полностью.')];
+    });
+}
+
+/**
+ * Защита от двойного фрахта (11.09.2026, решение пользователя).
+ *
+ * Фрахт по рейсу уже начислен: долг перевозчику + фрахт в себестоимости. Если потом «оплатить» его
+ * через логистический расход заказа или партии, получится не оплата, а ВТОРОЙ расход: деньги уйдут,
+ * долг перевозчику не уменьшится, фрахт ляжет в себестоимость дважды (а с выбранным перевозчиком —
+ * ещё и долг удвоится). Возвращает рейс, который уже везёт этот заказ/партию, или null.
+ */
+function shipment_blocking_freight(string $scopeType, int $scopeId): ?array
+{
+    shipments_ensure_tables();
+    $db = shipments_db();
+    if ($scopeType === 'order') return shipment_for_order($scopeId);
+
+    // партия: рейс на саму партию или рейс на любой её заказ по отдельности
+    $st = $db->prepare("SELECT s.* FROM llx_nt_shipment s
+                         WHERE (s.scope_type = 'batch' AND s.scope_id = ?)
+                            OR (s.scope_type = 'order' AND s.scope_id IN (
+                                  SELECT fk_order FROM llx_supplier_shipment_batch_order WHERE fk_batch = ?))
+                         ORDER BY s.rowid DESC LIMIT 1");
+    $st->bind_param('ii', $scopeId, $scopeId);
+    $st->execute();
+    $r = $st->get_result()->fetch_assoc();
+    $st->close();
+    return $r ?: null;
+}
+
+/** Текст отказа — один на обе формы. */
+function shipment_freight_block_message(array $s): string
+{
+    return 'Фрахт по этому грузу уже начислен рейсом №' . (int)$s['rowid'] . ' (' . money((float)$s['agreed_amount'], (string)$s['currency']) .
+           '). Здесь его вносить нельзя: деньги уйдут, а долг перевозчику не уменьшится и фрахт попадёт в себестоимость дважды. ' .
+           'Оплатить перевозчику — «Перевозчики» → перевозчик → «Оплатить», в поле «За какой рейс» выберите этот рейс.';
+}

@@ -238,6 +238,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $invCur = strtoupper(trim((string)($freshInv['multicurrency_code'] ?? ''))) ?: 'USD';
                 $invRate = (float)($freshInv['multicurrency_tx'] ?? 1) ?: 1.0;
 
+                // Та же валюта у счёта списания и счёта-фактуры (11.09.2026): 1000 EUR с евро-счёта должны
+                // закрыть ровно 1000 EUR долга. Dolibarr переводит платёж в валюту фактуры по ЕЁ курсу,
+                // поэтому и в доллары переводим по нему же, а не по введённому: иначе при малейшем
+                // расхождении курсов остаётся «хвост» в несколько евро, который никогда не закроется.
+                if ($accCur !== 'USD' && $accCur === $invCur) {
+                    $amountUsd = round($amount / $invRate, 2);
+                }
+
                 $paidSoFar = 0;
                 foreach ($api->getSupplierInvoicePayments($invId) as $p) { $paidSoFar += (float)($p['amount'] ?? 0); }
                 // Остаток и сверка — в БАЗОВОЙ валюте (в ней Dolibarr ведёт сам счёт-фактуру),
@@ -268,7 +276,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                               . "проверьте проводку на счёте «{$acc['label']}» вручную. ";
                     }
                 }
-                return ['ok' => true, 'warn' => $warn];
+                return ['ok' => true, 'warn' => $warn, 'amount_usd' => $amountUsd];
             });
 
             if (!$result['ok']) {
@@ -276,6 +284,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $messageType = 'err';
             } else {
                 $curLabel = $accCur === 'USD' ? '$' : $accCur;
+                $amountUsd = $result['amount_usd'] ?? $amountUsd;
                 $message = ($result['warn'] ?? '')
                     . "Оплачено {$amount} {$curLabel} по счёту #$invId ({$acc['label']}, {$method['label']})"
                     . ($accCur === 'USD' ? '' : ' — это ' . number_format($amountUsd, 2, '.', '') . ' $ по курсу ' . $payRate)

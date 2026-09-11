@@ -71,7 +71,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         require_once __DIR__ . '/includes/expense_accounts.php';
         $payAccounts = expense_payment_accounts(logistics_db(), $cfg, (string)($_SESSION['user']['login'] ?? ''));
         $pay = expense_parse_payment($_POST, $payAccounts);
-        if (!$pay['ok']) {
+        // Фрахт по грузу, у которого уже есть рейс, — только через «Перевозчики» (см. shipment_blocking_freight).
+        require_once __DIR__ . '/includes/shipments.php';
+        $blockShip = $expenseType === 'freight' ? shipment_blocking_freight('batch', (int)$batchId) : null;
+        if ($blockShip) {
+            $r = ['ok' => false, 'error' => shipment_freight_block_message($blockShip)];
+        } elseif (!$pay['ok']) {
             $r = ['ok' => false, 'error' => $pay['error']];
         } else {
             $r = logistics_record_expense('batch', $batchId, $expenseType, $pay['amount'], $pay['currency'], $pay['rate'],

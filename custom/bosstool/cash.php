@@ -110,6 +110,7 @@ require __DIR__ . '/includes/layout_top.php';
     <form method="post" onsubmit="return appConfirmSubmit(this, 'Записать расход и списать деньги с кассы?');">
     <?= csrf_field() ?>
       <input type="hidden" name="action" value="expense">
+      <p class="muted" style="margin:0 0 10px">⚠️ Таможня, фрахт, сертификат и расходы декларанта по поставке — <strong>не сюда</strong>. Их вносят в самом заказе поставщику (NodirTool → заказ → «Логистические расходы»), а фрахт по рейсу оплачивают в «Перевозчиках». Иначе деньги уйдут, но расход не попадёт в себестоимость товара, а долг перевозчику не уменьшится.</p>
       <label>Вид расхода</label>
       <select name="category_id" required>
         <option value="">— выберите —</option>
