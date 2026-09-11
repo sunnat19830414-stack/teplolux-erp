@@ -70,6 +70,13 @@ function shipments_ensure_tables(): void
     // где у каждой оплаты указан номер инвойса. Колонка добавляется к уже существующей таблице.
     $db->query("ALTER TABLE llx_carrier_payment ADD COLUMN IF NOT EXISTS fk_shipment INT DEFAULT NULL");
 
+    // Курсовая разница фрахта (11.09.2026): строка расхода, которую ведёт shipment_sync_fx().
+    // Вид расхода скрыт (active=0) — вручную его не вводят.
+    $db->query("ALTER TABLE llx_nt_shipment ADD COLUMN IF NOT EXISTS fk_fx_expense INT DEFAULT NULL");
+    logistics_ensure_tables();
+    $db->query("INSERT IGNORE INTO llx_nt_logistics_expense_type (code, name, active, sort_order, datec)
+                VALUES ('fx_diff', 'Курсовая разница (фрахт)', 0, 900, NOW())");
+
     $done = true;
 }
 
@@ -537,9 +544,80 @@ function carrier_pay(int $carrierId, int $accountId, string $accountCurrency, fl
         $db->rollback();
         return ['ok' => false, 'error' => 'Оплата не записана: ' . $e->getMessage()];
     }
-    return ['ok' => true, 'warning' => $warn, 'bank_amount' => $bankAmount, 'debt_amount' => $debtAmount,
+    $fxNote = '';
+    if ($shipmentId) {
+        $fx = shipment_sync_fx($shipmentId);
+        if (!empty($fx['changed']) && abs($fx['fx']) >= 0.01)
+            $fxNote = ' Курсовая разница по рейсу ' . ($fx['fx'] > 0 ? '+' : '−') . number_format(abs($fx['fx']), 2, '.', ' ') .
+                      ' $ — учтена в себестоимости.';
+    }
+    return ['ok' => true, 'warning' => $warn, 'bank_amount' => $bankAmount, 'debt_amount' => $debtAmount, 'fx_note' => $fxNote,
             'message' => 'Оплачено ' . money($bankAmount, $accountCurrency) .
                          ($accountCurrency !== $debtCurrency ? ' — закрыто ' . money($debtAmount, $debtCurrency) . ' долга' : '') . '.'];
+}
+
+/**
+ * Курсовая разница фрахта → себестоимость (11.09.2026, решение пользователя).
+ *
+ * Фрахт попадает в себестоимость при записи рейса — по курсу рейса (3 500 € по 0,86 = 4 069,77 $).
+ * Платят позже и по другому курсу: у заказа PO2609-0021 ушло 2 000 $ + 24 500 000 сум (2 080,68 $) =
+ * 4 080,68 $, и 10,91 $ в себестоимость не попадали.
+ *
+ * Разница считается по ОПЛАЧЕННОЙ части: сколько долларов реально ушло по оплатам рейса минус сколько
+ * стоили закрытые ими евро по курсу рейса. Поэтому она верна и при частичной оплате, а после каждой
+ * следующей просто пересчитывается. Рейс в долларах разницы не даёт — долг и так в долларах.
+ *
+ * Хранится ОДНОЙ строкой расхода вида fx_diff на той же поставке (заказ или партия), что и фрахт:
+ * без перевозчика и без банковской проводки — деньги уже ушли оплатами. Может быть отрицательной
+ * (заплатили по выгодному курсу). Ссылка на строку — llx_nt_shipment.fk_fx_expense. После изменения —
+ * пересчёт себестоимости поставки обычным logistics_recompute_cost().
+ */
+function shipment_sync_fx(int $shipmentId): array
+{
+    shipments_ensure_tables();
+    $db = shipments_db();
+    $s = shipment_get($shipmentId);
+    if (!$s) return ['ok' => false, 'error' => 'Рейс не найден.'];
+
+    $st = $db->prepare("SELECT COALESCE(SUM(native_amount),0) n, COALESCE(SUM(usd_amount),0) u
+                          FROM llx_carrier_payment WHERE fk_shipment = ?");
+    $st->bind_param('i', $shipmentId); $st->execute();
+    $p = $st->get_result()->fetch_assoc(); $st->close();
+
+    $cur = strtoupper((string)$s['currency']) ?: 'USD';
+    $rate = (float)($s['rate'] ?? 0);
+    $fx = ($cur === 'USD' || $rate <= 0) ? 0.0 : round((float)$p['u'] - (float)$p['n'] / $rate, 2);
+
+    $expId = (int)($s['fk_fx_expense'] ?? 0);
+    $old = null;
+    if ($expId) {
+        $r = $db->query("SELECT usd_amount FROM llx_supplier_logistics_expense WHERE rowid = $expId");
+        $old = ($r && $r->num_rows) ? (float)$r->fetch_assoc()['usd_amount'] : null;
+        if ($old === null) $expId = 0;                 // строку удалили в обход — заведём заново
+    }
+    if ($old !== null && abs($old - $fx) < 0.005) return ['ok' => true, 'fx' => $fx, 'changed' => false];
+    if ($old === null && abs($fx) < 0.005) return ['ok' => true, 'fx' => 0.0, 'changed' => false];
+
+    $comment = "Рейс №{$shipmentId}: оплачено " . number_format((float)$p['u'], 2, '.', '') . " \$ за "
+             . number_format((float)$p['n'], 2, '.', '') . " {$cur}, по курсу рейса {$rate} это "
+             . number_format((float)$p['n'] / $rate, 2, '.', '') . " \$";
+    if (abs($fx) < 0.005) {
+        $db->query("DELETE FROM llx_supplier_logistics_expense WHERE rowid = $expId");
+        $db->query("UPDATE llx_nt_shipment SET fk_fx_expense = NULL WHERE rowid = " . (int)$shipmentId);
+    } elseif ($expId) {
+        $st = $db->prepare("UPDATE llx_supplier_logistics_expense SET native_amount = ?, usd_amount = ?, comment = ? WHERE rowid = ?");
+        $st->bind_param('ddsi', $fx, $fx, $comment, $expId); $st->execute(); $st->close();
+    } else {
+        $now = date('Y-m-d H:i:s'); $uid = LOGISTICS_API_USER_ID;
+        $st = $db->prepare("INSERT INTO llx_supplier_logistics_expense
+            (scope_type, scope_id, expense_type, native_amount, native_currency, rate, usd_amount, fk_bank, fk_carrier, datec, fk_user, comment)
+            VALUES (?, ?, 'fx_diff', ?, 'USD', NULL, ?, NULL, NULL, ?, ?, ?)");
+        $st->bind_param('siddsis', $s['scope_type'], $s['scope_id'], $fx, $fx, $now, $uid, $comment);
+        $st->execute(); $newId = (int)$db->insert_id; $st->close();
+        $db->query("UPDATE llx_nt_shipment SET fk_fx_expense = $newId WHERE rowid = " . (int)$shipmentId);
+    }
+    logistics_recompute_cost($s['scope_type'], (int)$s['scope_id']);
+    return ['ok' => true, 'fx' => $fx, 'changed' => true];
 }
 
 /**
@@ -570,7 +648,8 @@ function shipment_pay(int $shipmentId, int $accountId, string $accountCurrency, 
                          $s['rate'] !== null ? (float)$s['rate'] : null);
         if (!empty($r['ok'])) {
             $leftAfter = round($left - $r['debt_amount'], 2);
-            $r['message'] .= ' ' . ($leftAfter > 0.01 ? 'По рейсу осталось ' . money($leftAfter, $debtCur) . '.' : 'Рейс оплачен полностью.');
+            $r['message'] .= ' ' . ($leftAfter > 0.01 ? 'По рейсу осталось ' . money($leftAfter, $debtCur) . '.' : 'Рейс оплачен полностью.')
+                           . ($r['fx_note'] ?? '');
         }
         return $r;
     });

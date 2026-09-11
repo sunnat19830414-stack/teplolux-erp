@@ -654,6 +654,9 @@ function logistics_delete_expense(int $expenseId): array
         return ['ok' => false, 'error' => 'Расход не найден.'];
     }
     $expense = $res->fetch_assoc();
+    if ($expense['expense_type'] === 'fx_diff') {
+        return ['ok' => false, 'error' => 'Курсовая разница считается сама по оплатам рейса — удалять её не нужно.'];
+    }
 
     $reversalNote = '';
     if (!empty($expense['fk_bank'])) {

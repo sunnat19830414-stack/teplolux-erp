@@ -37,6 +37,7 @@ $flash = flash_get();
 if ($flash) { $message = $flash['message']; $messageType = $flash['type']; }
 
 $types = logistics_expense_types(false);
+unset($types['fx_diff']);   // служебный: курсовую разницу ведёт программа (includes/shipments.php)
 $active = logistics_expense_types(true);
 
 // Сколько расходов уже внесено по каждому виду — чтобы было видно, что реально используется.

@@ -814,12 +814,16 @@ $mailHistory = mail_log_for_order($id);
           <td class="muted"><?= htmlspecialchars(substr($e['datec'], 0, 16)) ?></td>
           <td class="muted"><?= htmlspecialchars($e['comment']) ?></td>
           <td>
+<?php if ($e['expense_type'] === 'fx_diff'): ?>
+              <span class="muted small" title="Считается сама по оплатам рейса">авто</span>
+            <?php else: ?>
             <form method="post" onsubmit="return appConfirmSubmit(this, 'Удалить этот расход? Если по нему списывались деньги — они будут возвращены на счёт, себестоимость пересчитается заново.');">
   <?= csrf_field() ?>
               <input type="hidden" name="action" value="delete_expense">
               <input type="hidden" name="expense_id" value="<?= (int)$e['rowid'] ?>">
               <button type="submit" class="secondary small">✕</button>
             </form>
+            <?php endif; ?>
           </td>
         </tr>
       <?php endforeach; ?>
