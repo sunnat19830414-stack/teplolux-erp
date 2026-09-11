@@ -133,7 +133,8 @@
 
       <div class="nav-group-title">Закупки</div>
       <?php
-        $__nav('requests_in.php', 'Заявки от руководства', [], $__badge($__waiting));
+        $__nav('requests.php', 'Заявки на закупку', ['request_view.php']);
+        $__nav('requests_in.php', 'Заявки к оформлению', [], $__badge($__waiting));
         $__nav('orders.php', 'Заказы поставщику', ['order_view.php', 'product_form.php', 'price_history_view.php']);
         $__nav('suppliers.php', 'Поставщики / контракты', ['supplier_form.php']);
         $__nav('catalog.php', 'Каталог товаров', ['product_card.php']);

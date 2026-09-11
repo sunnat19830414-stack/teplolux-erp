@@ -17,7 +17,8 @@ require_once __DIR__ . '/includes/product_lookup.php';
 require_once __DIR__ . '/includes/currency.php';
 
 const PRODUCT_FORM_CONTEXTS = [
-    'orders' => ['page' => 'orders.php'],
+    'orders'  => ['page' => 'orders.php'],
+    'request' => ['page' => 'request_view.php'],   // из заявки на закупку (11.09.2026)
 ];
 
 // Направление → префикс кода и склад по умолчанию (те же значения, что в конфигах TeplouxKassa).
@@ -34,6 +35,11 @@ $messageType = '';
 $fields = ['ref' => '', 'label' => '', 'direction' => 'zhomi', 'price' => '', 'buy_price' => ''];
 // Закупочная цена — в валюте выбранного в заказе поставщика: корзина ведётся в ней (B2)
 $buyCur = strtoupper((string)($_SESSION['po_supplier']['currency'] ?? '')) ?: 'USD';
+if ($ctxKey === 'request') {   // из заявки — валюта поставщика заявки
+    require_once __DIR__ . '/includes/requests.php';
+    $rqCur = request_get((int)($_GET['request_id'] ?? $_POST['request_id'] ?? 0));
+    $buyCur = !empty($rqCur['fk_supplier']) ? supplier_currency($api->getThirdparty((int)$rqCur['fk_supplier']) ?: null) : 'USD';
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $fields['ref'] = trim($_POST['ref'] ?? '');
@@ -79,6 +85,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     . 'и добавлен в заказ.', 'ok');
             }
 
+            // Из заявки на закупку: товар сразу строкой в заявку, закупочная цена — как заводская поставщика заявки
+            if ($ctxKey === 'request') {
+                require_once __DIR__ . '/includes/requests.php';
+                $rid = (int)($_POST['request_id'] ?? $_GET['request_id'] ?? 0);
+                $rq = $rid ? request_get($rid) : null;
+                if ($rq && $rq['status'] === 'draft' && in_array($rq['created_by'], array_keys($cfg['users']), true)) {
+                    request_add_line($rid, $newId, $fields['ref'], $fields['label'], 1, '');
+                    if ($buyPrice > 0 && !empty($rq['fk_supplier'])) {
+                        require_once __DIR__ . '/includes/price_history.php';
+                        $rc = supplier_currency($api->getThirdparty((int)$rq['fk_supplier']) ?: null);
+                        save_purchase_price_with_history($api, $newId, (int)$rq['fk_supplier'], $buyPrice, $_SESSION['user']['name'] ?? '', $rc,
+                                                         $rc === 'USD' ? 1.0 : (float)(dolibarr_currency_rate($rc) ?? 1.0));
+                    }
+                    header('Location: request_view.php?id=' . $rid);
+                    exit;
+                }
+            }
+
             // Сразу положить в корзину заказа — ради этого форма и открывалась. В корзину идёт
             // ЗАКУПОЧНАЯ цена (11.09.2026): раньше туда уходила цена продажи из этой же формы, и заказ
             // поставщику получал нашу розницу вместо цены поставщика.
@@ -109,6 +133,7 @@ require __DIR__ . '/includes/layout_top.php';
   <form method="post">
   <?= csrf_field() ?>
     <input type="hidden" name="ctx" value="<?= htmlspecialchars($ctxKey) ?>">
+    <input type="hidden" name="request_id" value="<?= (int)($_GET['request_id'] ?? $_POST['request_id'] ?? 0) ?>">
 
     <label>Артикул поставщика</label>
     <input type="text" name="ref" value="<?= htmlspecialchars($fields['ref']) ?>" required autofocus
@@ -138,7 +163,7 @@ require __DIR__ . '/includes/layout_top.php';
 
     <div class="row">
       <div style="flex:0"><button type="submit">Создать и добавить в заказ</button></div>
-      <div style="flex:0"><a class="btn secondary" href="<?= htmlspecialchars($ctx['page']) ?>">Отмена</a></div>
+      <div style="flex:0"><a class="btn secondary" href="<?= htmlspecialchars($ctx['page'] . ($ctxKey === 'request' ? '?id=' . (int)($_GET['request_id'] ?? $_POST['request_id'] ?? 0) : '')) ?>">Отмена</a></div>
     </div>
   </form>
 </div>
