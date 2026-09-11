@@ -282,16 +282,20 @@ require __DIR__ . '/includes/layout_top.php';
       <div>
         <label>За какой рейс</label>
         <select name="shipment_id" id="cpShip">
-          <option value="" data-cur="">— в общий долг —</option>
-          <?php foreach ($openShipments as $sh):
+          <?php
+            // По умолчанию выбран рейс, а не «общий долг» (11.09.2026): первая живая доплата остатка
+            // ушла «в общий долг» — долг перевозчика ноль, а рейс остался «оплачен частично».
+            $firstShip = true;
+            foreach ($openShipments as $sh):
                 $shDue = (float)($sh['invoice_amount'] ?? $sh['agreed_amount']);
                 $shLeft = round($shDue - (float)$sh['paid_native'], 2); ?>
-            <option value="<?= (int)$sh['rowid'] ?>" data-cur="<?= htmlspecialchars(strtoupper($sh['currency'])) ?>" data-left="<?= $shLeft ?>"
+            <option value="<?= (int)$sh['rowid'] ?>"<?= $firstShip ? ' selected' : '' ?><?php $firstShip = false; ?> data-cur="<?= htmlspecialchars(strtoupper($sh['currency'])) ?>" data-left="<?= $shLeft ?>"
                     data-ref="<?= strtoupper($sh['currency']) === 'USD' ? 1 : (float)$sh['rate'] ?>">
               №<?= (int)$sh['rowid'] ?> <?= htmlspecialchars(trim($sh['route_from'] . ' → ' . $sh['route_to'], ' →')) ?>
               · осталось <?= htmlspecialchars(money($shLeft, $sh['currency'])) ?>
             </option>
           <?php endforeach; ?>
+          <option value="" data-cur="">— без рейса, в общий долг (аванс, старый долг) —</option>
         </select>
       </div>
       <div id="cpDebtCurBox">
