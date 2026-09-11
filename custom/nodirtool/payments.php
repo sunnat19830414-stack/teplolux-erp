@@ -307,6 +307,51 @@ if ($flash) {
 }
 
 // --- Дашборд "кому должны": показываем ДО выбора поставщика, чтобы не искать вручную ---
+/**
+ * Заказы, по которым пора оформлять счёт (11.09.2026). Раньше — только ПОЛУЧЕННЫЕ (частично/полностью).
+ * Но у 39 из 46 поставщиков предоплата: платим ДО отгрузки, и их утверждённые/отправленные заказы в
+ * раздел не попадали вовсе (ZILIO PO2609-0021, OSTENDORF PO2609-0020). Теперь:
+ *   предоплата — заказ утверждён, отправлен или получен → счёт на ЗАКАЗАННОЕ количество;
+ *   постоплата — только полученный → счёт на ПРИНЯТОЕ; утверждённый/отправленный показываем
+ *                отдельно, без кнопки: платить за ещё не привезённое при постоплате не нужно.
+ * Заказы, по которым счёт уже есть (ref_supplier = номер заказа), не показываются (BUG-N1).
+ * Возвращает строки: id, ref, socid, status, status_label, currency, total, kind (prepay|received|postpay_wait).
+ */
+function pay_orders_without_invoice(DolibarrApi $api, ?int $onlySoc = null): array
+{
+    $labels = ['approved' => 'утверждён', 'running' => 'отправлен поставщику',
+               'received_start' => 'получен частично', 'received_end' => 'получен полностью'];
+    $invoicedRefs = $api->getInvoicedSupplierOrderRefs();
+    $rows = [];
+    foreach ($labels as $st => $lbl) {
+        $list = $api->getSupplierOrdersByStatus($st, 'id,ref,socid,statut,total_ttc,multicurrency_code,multicurrency_total_ttc');
+        if (!is_array($list)) continue;
+        foreach ($list as $r) {
+            $socid = (int)($r['socid'] ?? 0);
+            if (!$socid || ($onlySoc !== null && $socid !== $onlySoc)) continue;
+            if (!empty($invoicedRefs[$r['ref'] ?? ''])) continue;
+            $cur = strtoupper(trim((string)($r['multicurrency_code'] ?? ''))) ?: 'USD';
+            $rows[] = ['id' => (int)$r['id'], 'ref' => (string)$r['ref'], 'socid' => $socid, 'status' => $st, 'status_label' => $lbl,
+                       'currency' => $cur,
+                       'total' => $cur === 'USD' ? (float)($r['total_ttc'] ?? 0) : (float)($r['multicurrency_total_ttc'] ?? $r['total_ttc'] ?? 0)];
+        }
+    }
+    if (!$rows) return [];
+    // условия оплаты — одним запросом по всем поставщикам из списка
+    $ids = implode(',', array_unique(array_map(fn($r) => $r['socid'], $rows)));
+    $terms = [];
+    $res = debt_db()->query("SELECT fk_object, payment_terms FROM llx_societe_extrafields WHERE fk_object IN ($ids)");
+    while ($x = $res->fetch_assoc()) $terms[(int)$x['fk_object']] = (string)$x['payment_terms'];
+    foreach ($rows as &$r) {
+        $received = in_array($r['status'], ['received_start', 'received_end'], true);
+        $postpay = ($terms[$r['socid']] ?? '') === 'postpay';
+        $r['kind'] = $received ? 'received' : ($postpay ? 'postpay_wait' : 'prepay');
+    }
+    unset($r);
+    usort($rows, fn($a, $b) => $b['id'] <=> $a['id']);
+    return $rows;
+}
+
 // Две категории денег, ожидающих оплаты: (1) уже оформленные счета поставщику с остатком > 0,
 // (2) заказы, которые УЖЕ получены на склад, но счёт по ним ещё не оформлен (тоже реальный долг,
 // просто ещё не формализованный документом) — считаем и показываем оба сигнала в одном блоке.
@@ -328,34 +373,22 @@ if (empty($_SESSION['pay_supplier'])) {
         if (isset($bySoc[$socid]) && (float)$inv['remaining_native'] > 0.01) $bySoc[$socid]['invCount']++;
     }
 
-    // BUG-N1 (внешний отчёт, 02.09.2026): заказы, по которым счёт УЖЕ создан, не должны считаться
-    // "без счёта" — раньше список/счётчик показывали ВСЕ полученные заказы независимо от наличия
-    // счёта. Набор уже выставленных номеров заказов (ref_supplier) — одним запросом на всю базу,
-    // не по поставщику в цикле.
-    $invoicedRefs = $api->getInvoicedSupplierOrderRefs();
-    foreach (['received_start', 'received_end'] as $st) {
-        $rows = $api->getSupplierOrdersByStatus($st, 'id,ref,socid,statut,total_ttc,multicurrency_code,multicurrency_total_ttc');
-        if (is_array($rows)) {
-            foreach ($rows as $row) {
-                $socid = (int)($row['socid'] ?? 0);
-                if (!$socid) continue;
-                if (!empty($invoicedRefs[$row['ref'] ?? ''])) continue; // счёт уже есть — не "без счёта"
-                if (!isset($bySoc[$socid])) $bySoc[$socid] = ['unpaid' => [], 'invCount' => 0, 'pendingCount' => 0, 'pendingSum' => []];
-                $cur = strtoupper(trim((string)($row['multicurrency_code'] ?? ''))) ?: 'USD';
-                $amount = $cur === 'USD'
-                    ? (float)($row['total_ttc'] ?? 0)
-                    : (float)($row['multicurrency_total_ttc'] ?? $row['total_ttc'] ?? 0);
-                $bySoc[$socid]['pendingCount']++;
-                $bySoc[$socid]['pendingSum'][$cur] = ($bySoc[$socid]['pendingSum'][$cur] ?? 0) + $amount;
-            }
-        }
+    // Заказы без счёта: полученные (как было) и — 11.09.2026 — утверждённые/отправленные у поставщиков
+    // предоплаты. BUG-N1: заказы, по которым счёт уже создан, сюда не попадают.
+    foreach (pay_orders_without_invoice($api) as $row) {
+        if ($row['kind'] === 'postpay_wait') continue;          // постоплата: платить после приёмки
+        $socid = $row['socid'];
+        if (!isset($bySoc[$socid])) $bySoc[$socid] = ['unpaid' => [], 'invCount' => 0, 'pendingCount' => 0, 'pendingSum' => []];
+        $k = $row['kind'] === 'prepay' ? 'prepay' : 'pending';
+        $bySoc[$socid][$k . 'Count'] = ($bySoc[$socid][$k . 'Count'] ?? 0) + 1;
+        $bySoc[$socid][$k . 'Sum'][$row['currency']] = ($bySoc[$socid][$k . 'Sum'][$row['currency']] ?? 0) + $row['total'];
     }
 
     // Сортируем по долларовому эквиваленту — сложить разные валюты в одно число нельзя, а порядок
     // «кому должны больше всего» нужен. На экран этот эквивалент не выводится, там родная валюта.
     uasort($bySoc, fn($a, $b) =>
-        (debt_sort_key($b['unpaid']) + debt_sort_key($b['pendingSum']))
-        <=> (debt_sort_key($a['unpaid']) + debt_sort_key($a['pendingSum'])));
+        (debt_sort_key($b['unpaid']) + debt_sort_key($b['pendingSum']) + debt_sort_key($b['prepaySum'] ?? []))
+        <=> (debt_sort_key($a['unpaid']) + debt_sort_key($a['pendingSum']) + debt_sort_key($a['prepaySum'] ?? [])));
 
     // Имена всех поставщиков в списке — ОДНИМ запросом, не getThirdparty() по одному в цикле
     // (см. отчёт ревью P0#5).
@@ -374,25 +407,12 @@ $readyOrders = [];
 $invoices = [];
 if ($_SESSION['pay_supplier']) {
     $socId = (int)$_SESSION['pay_supplier']['id'];
-    $invoicedRefs = $api->getInvoicedSupplierOrderRefs(); // BUG-N1, см. выше — не показывать заказы, по которым счёт уже есть
-    foreach (['received_start', 'received_end'] as $st) {
-        $rows = $api->getSupplierOrdersByStatus($st, 'id,ref,socid,statut,total_ttc,multicurrency_code,multicurrency_total_ttc');
-        if (is_array($rows)) {
-            foreach ($rows as $row) {
-                if ((int)$row['socid'] === $socId && empty($invoicedRefs[$row['ref'] ?? ''])) {
-                    // Сумма заказа — в валюте заказа: платить поставщику придётся именно в ней.
-                    $oc = strtoupper(trim((string)($row['multicurrency_code'] ?? ''))) ?: 'USD';
-                    $readyOrders[] = [
-                        'id' => (int)$row['id'],
-                        'ref' => $row['ref'],
-                        'currency' => $oc,
-                        'total_ttc' => $oc === 'USD'
-                            ? (float)$row['total_ttc']
-                            : (float)($row['multicurrency_total_ttc'] ?? $row['total_ttc']),
-                    ];
-                }
-            }
-        }
+    // Заказы без счёта — с учётом условий оплаты поставщика (см. pay_orders_without_invoice()).
+    $postpayWaiting = [];
+    foreach (pay_orders_without_invoice($api, $socId) as $row) {
+        if ($row['kind'] === 'postpay_wait') { $postpayWaiting[] = $row; continue; }
+        $readyOrders[] = ['id' => $row['id'], 'ref' => $row['ref'], 'currency' => $row['currency'],
+                          'total_ttc' => $row['total'], 'status_label' => $row['status_label'], 'kind' => $row['kind']];
     }
 
     $rawInvoices = $api->getSupplierInvoicesForSupplier($socId);
@@ -444,7 +464,8 @@ require __DIR__ . '/includes/layout_top.php';
 ?>
 
 <h1>Оплата поставщикам</h1>
-<p class="muted">Счёт поставщику оформляется из уже полученного заказа, оплата может быть частичной.</p>
+<p class="muted">Счёт поставщику оформляется из заказа: при предоплате — как только заказ утверждён, при
+  постоплате — после приёмки на склад. Оплата может быть частичной.</p>
 <?php if ($_SESSION['pay_supplier']): ?>
   <form method="post" style="margin-bottom:14px">
   <?= csrf_field() ?>
@@ -479,7 +500,7 @@ require __DIR__ . '/includes/layout_top.php';
 <div class="card">
   <h2>Ждут оплаты</h2>
   <?php if (empty($owedSuppliers)): ?>
-    <p class="muted">Никто не ждёт оплаты — все счета оплачены, неоформленных приёмок нет.</p>
+    <p class="muted">Никто не ждёт оплаты — все счета оплачены, заказов без счёта нет.</p>
   <?php else: ?>
     <div class="debtor-grid">
       <?php foreach ($owedSuppliers as $s): ?>
@@ -492,6 +513,9 @@ require __DIR__ . '/includes/layout_top.php';
             <span class="debtor-block-name"><?= htmlspecialchars($s['name']) ?></span>
             <?php if (!empty($s['unpaid'])): ?>
               <span class="badge badge-debt"><?= htmlspecialchars(money_by_currency($s['unpaid'])) ?> · <?= $s['invCount'] ?> <?= $s['invCount'] == 1 ? 'счёт' : 'счёта(ов)' ?></span>
+            <?php endif; ?>
+            <?php if (!empty($s['prepayCount'])): ?>
+              <span class="badge badge-warn"><?= $s['prepayCount'] ?> заказ(ов) ждут предоплаты (<?= htmlspecialchars(money_by_currency($s['prepaySum'])) ?>)</span>
             <?php endif; ?>
             <?php if ($s['pendingCount'] > 0): ?>
               <span class="badge badge-warn"><?= $s['pendingCount'] ?> заказ(ов) получено, счёт не оформлен (<?= htmlspecialchars(money_by_currency($s['pendingSum'])) ?>)</span>
@@ -507,24 +531,31 @@ require __DIR__ . '/includes/layout_top.php';
 <?php if ($_SESSION['pay_supplier']): ?>
 
 <div class="card">
-  <h2>Полученные заказы без счёта</h2>
-  <p class="muted">Если счёт по заказу уже был создан раньше — не создавайте повторно.</p>
+  <h2>Заказы без счёта</h2>
+  <p class="muted">Сначала создайте счёт по заказу, затем оплатите его ниже — целиком или частями.
+    Предоплата: счёт на заказанное количество. Постоплата: на принятое складом.</p>
   <?php if (empty($readyOrders)): ?>
-    <p class="muted">Нет полученных заказов у этого поставщика.</p>
+    <p class="muted">Нет заказов, по которым нужно оформить счёт.</p>
   <?php else: ?>
     <table>
-      <tr><th>Заказ</th><th>Сумма</th><th></th></tr>
+      <tr><th>Заказ</th><th>Положение</th><th>Сумма</th><th></th></tr>
       <?php foreach ($readyOrders as $o): ?>
         <tr>
-          <td><?= htmlspecialchars($o['ref']) ?></td>
+          <td><a href="order_view.php?id=<?= (int)$o['id'] ?>"><?= htmlspecialchars($o['ref']) ?></a></td>
+          <td><?= htmlspecialchars($o['status_label']) ?>
+            <?php if ($o['kind'] === 'prepay'): ?><div class="muted" style="font-size:12px">предоплата — платим до отгрузки</div><?php endif; ?></td>
           <td><?= htmlspecialchars(money($o['total_ttc'], $o['currency'])) ?></td>
           <td>
             <form method="post">
-  <?= csrf_field() ?><input type="hidden" name="action" value="create_invoice_from_order"><input type="hidden" name="order_id" value="<?= $o['id'] ?>"><button type="submit" class="small">Создать счёт</button></form>
+  <?= csrf_field() ?><input type="hidden" name="action" value="create_invoice_from_order"><input type="hidden" name="order_id" value="<?= $o['id'] ?>"><button type="submit" class="small"><?= $o['kind'] === 'prepay' ? 'Создать счёт на предоплату' : 'Создать счёт' ?></button></form>
           </td>
         </tr>
       <?php endforeach; ?>
     </table>
+  <?php endif; ?>
+  <?php if (!empty($postpayWaiting)): ?>
+    <p class="muted" style="margin-top:10px">Постоплата — счёт после приёмки на склад:
+      <?= implode(', ', array_map(fn($o) => htmlspecialchars($o['ref'] . ' (' . $o['status_label'] . ', ' . money($o['total'], $o['currency']) . ')'), $postpayWaiting)) ?>.</p>
   <?php endif; ?>
 </div>
 
