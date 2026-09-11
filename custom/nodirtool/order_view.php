@@ -706,7 +706,7 @@ $mailHistory = mail_log_for_order($id);
             <td><?= htmlspecialchars($r['reception_ref'] ?: '—') ?></td>
             <td><?= htmlspecialchars($line['product_label'] ?? $line['desc'] ?? ('товар #' . $r['fk_product'])) ?></td>
             <td><?= rtrim(rtrim(number_format($r['qty'], 3, '.', ''), '0'), '.') ?></td>
-            <td class="muted">склад #<?= $r['warehouse_id'] ?></td>
+            <td class="muted"><?= htmlspecialchars($r['warehouse'] ?: ('склад #' . $r['warehouse_id'])) ?></td>
           </tr>
         <?php endforeach; ?>
       </table>

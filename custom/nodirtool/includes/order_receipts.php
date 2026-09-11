@@ -31,10 +31,14 @@ function get_order_receipts(int $orderId): array
     if (!$orderId) return [];
     $db = order_receipts_db();
     $stmt = $db->prepare(
+        // Название склада берём из Dolibarr, а не показываем номер: «склад #4» человеку ничего
+        // не говорит и не совпадает с тем, что он видит в самом Dolibarr (замечание Жамшида
+        // 11.09.2026 про расхождение названий складов).
         "SELECT rb.fk_product, rb.qty, rb.fk_entrepot, rb.datec, rb.fk_elementdet,
-                r.ref AS reception_ref, r.date_reception
+                r.ref AS reception_ref, r.date_reception, w.ref AS warehouse_ref
          FROM llx_receptiondet_batch rb
          LEFT JOIN llx_reception r ON r.rowid = rb.fk_reception
+         LEFT JOIN llx_entrepot w ON w.rowid = rb.fk_entrepot
          WHERE rb.fk_element = ?
          ORDER BY rb.datec DESC"
     );
@@ -47,6 +51,7 @@ function get_order_receipts(int $orderId): array
             'fk_product' => (int)$row['fk_product'],
             'qty' => (float)$row['qty'],
             'warehouse_id' => (int)$row['fk_entrepot'],
+            'warehouse' => (string)($row['warehouse_ref'] ?? ''),
             'date' => $row['date_reception'] ?: $row['datec'],
             'reception_ref' => $row['reception_ref'] ?: '',
             'line_id' => (int)$row['fk_elementdet'],

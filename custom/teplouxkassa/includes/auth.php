@@ -46,6 +46,37 @@ $cfg = require $configFile;
 // с настройками самого направления. Значения из config.<direction>.php имеют приоритет при совпадении.
 $cfg = array_merge(require __DIR__ . '/../config/shared.php', $cfg);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Названия складов берём ИЗ DOLIBARR, а не из конфига (замечание Жамшида 11.09.2026:
+// «название складов в Dolibarr и в инструменте разные»). Он был прав: в конфиге Жоми стояли
+// выдуманные «01 Жоми склад 01», а в Dolibarr они называются «01 Teplolux c», «02 Склад X»,
+// «03 Склад K» — и это осмысленные имена, они же встречаются в старой базе «Бизнес».
+// Единый источник правды — Dolibarr; значения из конфига остаются запасными на случай, если
+// база недоступна, и как список складов направления (какие вообще показывать этому кассиру).
+// Кэшируем в сессии: запрос на каждой странице ради трёх строк не нужен.
+// ─────────────────────────────────────────────────────────────────────────────
+if (!isset($_SESSION['warehouse_labels_cache'][$_SESSION['direction']])) {
+    $fromDb = [];
+    try {
+        require_once __DIR__ . '/dolibarr_direct.php';
+        $ids = implode(',', array_map('intval', array_keys($cfg['warehouse_labels'])));
+        if ($ids !== '') {
+            $res = dolibarr_db_readonly()->query(
+                "SELECT rowid, ref, lieu FROM llx_entrepot WHERE rowid IN ($ids)");
+            while ($w = $res->fetch_assoc()) {
+                $name = trim((string)$w['ref']);
+                if ($name !== '') $fromDb[(int)$w['rowid']] = $name;
+            }
+        }
+    } catch (Throwable $e) {
+        $fromDb = [];      // база недоступна — молча остаёмся на названиях из конфига
+    }
+    $_SESSION['warehouse_labels_cache'][$_SESSION['direction']] = $fromDb;
+}
+foreach ($_SESSION['warehouse_labels_cache'][$_SESSION['direction']] as $whId => $whName) {
+    if (isset($cfg['warehouse_labels'][$whId])) $cfg['warehouse_labels'][$whId] = $whName;
+}
+
 require_once __DIR__ . '/dolibarr_api.php';
 $api = new DolibarrApi($cfg['api_base_url'], $cfg['api_key']);
 
