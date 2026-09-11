@@ -20,6 +20,7 @@
  * Каждая правка пишется в `llx_nt_product_log`: кто, когда, из какого инструмента, что было и что
  * стало. Без этого через месяц нельзя ответить на вопрос «кто поставил такую цену».
  */
+require_once __DIR__ . '/sellable_stock.php';
 
 /**
  * Подключение к БД Dolibarr. Путь `config/db.local.php` одинаков во всех трёх инструментах,
@@ -116,7 +117,8 @@ function catalog_search(mysqli $db, array $caps, array $f): array
     if (!empty($f['missing']) && isset($missingMap[$f['missing']])) $where[] = $missingMap[$f['missing']];
 
     if (!empty($f['instock'])) {
-        $where[] = 'COALESCE((SELECT SUM(ps.reel) FROM llx_product_stock ps WHERE ps.fk_product = p.rowid),0) > 0';
+        // годный остаток: склады брака не считаются «в наличии» (11.09.2026)
+        $where[] = nt_sellable_stock_sql($db, 'p') . ' > 0';
     }
 
     $order = [
@@ -133,7 +135,7 @@ function catalog_search(mysqli $db, array $caps, array $f): array
     $sql = "SELECT p.rowid, p.ref, p.label, p.price, p.weight, p.customcode, p.description,
                    p.length, p.width, p.height, p.volume,
                    e.artikul, e.kod_sap, e.weight_net, e.weight_gross, e.pcs_per_box, e.pcs_per_master,
-                   COALESCE((SELECT SUM(ps.reel) FROM llx_product_stock ps WHERE ps.fk_product = p.rowid),0) stock,
+                   " . nt_sellable_stock_sql($db, 'p') . " stock,
                    COALESCE((SELECT SUM(h.qty_sold) FROM llx_nt_sales_history h WHERE h.fk_product = p.rowid),0) sold
             FROM llx_product p
             LEFT JOIN llx_product_extrafields e ON e.fk_object = p.rowid
@@ -173,11 +175,15 @@ function catalog_load(mysqli $db, array $caps, int $id): ?array
     foreach ($dirs as $d) if (str_starts_with($kod, $d)) $ok = true;
     if (!$ok) return null;   // чужое направление — как будто товара нет
 
-    $st = $db->prepare("SELECT w.ref, w.lieu, ps.reel FROM llx_product_stock ps
+    // В карточке показываем и склад брака — но с пометкой, чтобы было видно, что он не на продажу.
+    $st = $db->prepare("SELECT w.rowid wid, w.ref, w.lieu, ps.reel FROM llx_product_stock ps
                         JOIN llx_entrepot w ON w.rowid = ps.fk_entrepot
                         WHERE ps.fk_product = ? AND ps.reel <> 0 ORDER BY w.ref");
     $st->bind_param('i', $id); $st->execute();
     $p['stock_rows'] = $st->get_result()->fetch_all(MYSQLI_ASSOC); $st->close();
+    $defect = nt_defect_warehouse_ids($db);
+    foreach ($p['stock_rows'] as &$sr) $sr['is_defect'] = in_array((int)$sr['wid'], $defect, true);
+    unset($sr);
 
     if (catalog_can($caps, 'view', 'purchase')) {
         $st = $db->prepare("SELECT fp.multicurrency_price, fp.multicurrency_code, fp.price,

@@ -17,6 +17,7 @@
  * оказалась бы занижена в шесть раз, и это молча, без единой ошибки на экране. Поэтому делим на
  * фактическую глубину данных (но не больше 12 месяцев) и подписываем её в интерфейсе.
  */
+require_once __DIR__ . '/sellable_stock.php';
 require_once __DIR__ . '/stock_lookup.php';
 
 /**
@@ -136,7 +137,8 @@ function supplier_order_suggestions(int $supplierId, array $directions, float $m
         $where[] = "e.kod_sap LIKE '" . $db->real_escape_string($directions[0]) . "%'";
     }
     $res = $db->query(
-        "SELECT p.rowid AS id, p.ref, p.label, p.stock, p.customcode, e.kod_sap
+        // годный остаток: брак не должен уменьшать рекомендацию к закупке (11.09.2026)
+        "SELECT p.rowid AS id, p.ref, p.label, " . nt_sellable_stock_sql($db, 'p') . " AS stock, p.customcode, e.kod_sap
          FROM llx_product p
          LEFT JOIN llx_product_extrafields e ON e.fk_object = p.rowid
          WHERE " . implode(' AND ', $where) . "

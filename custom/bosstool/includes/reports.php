@@ -7,6 +7,7 @@
  * там, где источник данных его поддерживает, фильтруем по нему; где нет (общие счета компании,
  * зарплата) — это честно помечено в самом отчёте, а не молча смешано.
  */
+require_once __DIR__ . '/sellable_stock.php';
 require_once __DIR__ . '/stock_lookup.php';
 
 function reports_db(): mysqli
@@ -324,7 +325,7 @@ function report_demand(array $directions, string $from, string $to, int $horizon
 
     $sql = "SELECT s.fk_product,
                    SUM(s.sold) AS sold,
-                   p.ref, p.label, p.stock AS stock, pe.kod_sap
+                   p.ref, p.label, " . nt_sellable_stock_sql($db, 'p') . " AS stock, pe.kod_sap
             FROM (
                 SELECT h.fk_product, (h.qty_sold - h.qty_returned) AS sold
                 FROM llx_nt_sales_history h

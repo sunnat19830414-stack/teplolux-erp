@@ -82,7 +82,8 @@ require __DIR__ . '/includes/layout_top.php';
         <table>
           <?php foreach ($p['stock_rows'] as $s): ?>
             <tr>
-              <td><?= htmlspecialchars((string)($s['lieu'] ?: $s['ref'])) ?></td>
+              <td><?= htmlspecialchars((string)($s['ref'] ?: $s['lieu'])) ?>
+                <?php if (!empty($s['is_defect'])): ?><span class="badge badge-debt">брак — не для продажи</span><?php endif; ?></td>
               <td style="text-align:right"><strong><?= number_format((float)$s['reel'], 0, '.', ' ') ?></strong> шт</td>
             </tr>
           <?php endforeach; ?>

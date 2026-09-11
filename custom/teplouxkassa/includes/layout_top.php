@@ -235,6 +235,7 @@ if ($__cashAcc) {
       <a href="shift.php" class="<?= $__page === 'shift.php' ? 'active' : '' ?>">Сменный отчёт</a>
       <div class="nav-group-title">Склад</div>
       <a href="receive.php" class="<?= $__page === 'receive.php' ? 'active' : '' ?>">Приём товара</a>
+      <a href="defects.php" class="<?= $__page === 'defects.php' ? 'active' : '' ?>">Брак на складе</a>
       <a href="transfer.php" class="<?= $__page === 'transfer.php' ? 'active' : '' ?>">Перемещение</a>
       <a href="inventory.php" class="<?= $__page === 'inventory.php' ? 'active' : '' ?>">Инвентаризация</a>
       <a href="stock.php" class="<?= $__page === 'stock.php' ? 'active' : '' ?>">Остатки</a>

@@ -191,6 +191,33 @@ require __DIR__ . '/includes/layout_top.php';
     <?php endif; ?>
     <p style="white-space:pre-line"><?= htmlspecialchars((string)$selected['description']) ?></p>
 
+    <?php
+    // Фото брака (11.09.2026): касса прикрепляет их к заказу поставщику с именем brak_<id>_<n>.jpg.
+    // Ищем по префиксу среди документов заказа — отдельного хранилища у рекламаций нет, и не нужно:
+    // те же файлы видны на странице заказа и в самом Dolibarr.
+    $claimPhotos = [];
+    if ((int)$selected['fk_order'] > 0) {
+        $ordForPhotos = $api->getSupplierOrder((int)$selected['fk_order']);
+        if (is_array($ordForPhotos) && !empty($ordForPhotos['ref'])) {
+            foreach ($api->getOrderDocuments($ordForPhotos['ref']) as $doc) {
+                $fn = (string)($doc['name'] ?? $doc['filename'] ?? '');
+                if (str_starts_with($fn, 'brak_' . (int)$selected['rowid'] . '_')) $claimPhotos[] = $fn;
+            }
+        }
+    }
+    ?>
+    <?php if ($claimPhotos): ?>
+      <p><strong>Фото брака:</strong>
+        <?php foreach ($claimPhotos as $n => $fn): ?>
+          <a class="btn secondary small" target="_blank"
+             href="document_download.php?order_id=<?= (int)$selected['fk_order'] ?>&amp;filename=<?= urlencode($fn) ?>">фото <?= $n + 1 ?></a>
+        <?php endforeach; ?>
+      </p>
+    <?php endif; ?>
+    <?php if ((int)$selected['fk_order'] > 0): ?>
+      <p class="muted"><a href="order_view.php?id=<?= (int)$selected['fk_order'] ?>">Открыть заказ</a></p>
+    <?php endif; ?>
+
     <?php if ($selected['status'] === 'closed'): ?>
       <p class="ok" style="display:inline-block">Закрыта: <?= htmlspecialchars(CLAIM_RESOLUTIONS[$selected['resolution']] ?? '') ?></p>
       <?php if ($selected['resolution_note']): ?>

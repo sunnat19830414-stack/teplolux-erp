@@ -59,7 +59,9 @@ if (!isset($_SESSION['warehouse_labels_cache'][$_SESSION['direction']])) {
     $fromDb = [];
     try {
         require_once __DIR__ . '/dolibarr_direct.php';
-        $ids = implode(',', array_map('intval', array_keys($cfg['warehouse_labels'])));
+        $idList = array_keys($cfg['warehouse_labels']);
+        if (!empty($cfg['defect_warehouse_id'])) $idList[] = (int)$cfg['defect_warehouse_id'];
+        $ids = implode(',', array_map('intval', $idList));
         if ($ids !== '') {
             $res = dolibarr_db_readonly()->query(
                 "SELECT rowid, ref, lieu FROM llx_entrepot WHERE rowid IN ($ids)");
@@ -76,6 +78,9 @@ if (!isset($_SESSION['warehouse_labels_cache'][$_SESSION['direction']])) {
 foreach ($_SESSION['warehouse_labels_cache'][$_SESSION['direction']] as $whId => $whName) {
     if (isset($cfg['warehouse_labels'][$whId])) $cfg['warehouse_labels'][$whId] = $whName;
 }
+// склад брака — отдельно: в warehouse_labels его нет намеренно (не для продажи)
+$cfg['defect_warehouse_label'] = $_SESSION['warehouse_labels_cache'][$_SESSION['direction']][(int)($cfg['defect_warehouse_id'] ?? 0)]
+    ?? 'склад брака';
 
 require_once __DIR__ . '/dolibarr_api.php';
 $api = new DolibarrApi($cfg['api_base_url'], $cfg['api_key']);

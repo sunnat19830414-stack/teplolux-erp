@@ -104,7 +104,9 @@ class DolibarrApi
             $where[] = "(p.ref LIKE '%{$t}%' OR p.label LIKE '%{$t}%')";
         }
 
-        $sql = "SELECT p.rowid AS id, p.ref, p.label, p.stock AS stock_reel
+        require_once __DIR__ . '/sellable_stock.php';
+        // годный остаток, без складов брака (11.09.2026)
+        $sql = "SELECT p.rowid AS id, p.ref, p.label, " . nt_sellable_stock_sql($conn, 'p') . " AS stock_reel
                 FROM llx_product p
                 LEFT JOIN llx_product_extrafields e ON e.fk_object = p.rowid
                 WHERE " . implode(' AND ', $where) . "
