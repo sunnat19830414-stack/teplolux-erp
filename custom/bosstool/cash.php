@@ -7,6 +7,7 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/boss_cash.php';
 require_once __DIR__ . '/includes/stock_lookup.php';
 require_once __DIR__ . '/includes/owner_moves.php';
+require_once __DIR__ . '/includes/cash_handover.php';
 
 $me = $_SESSION['user'];
 $acc = $me['cash_account'] ?? null;
@@ -18,6 +19,11 @@ $accId = (int)$acc['id'];
 // Касса шефа (11.09.2026): пополнение счетов компании из своих денег = вложение собственника,
 // деньги компании, забранные себе, = изъятие. См. includes/owner_moves.php.
 $isBoss = $accId === (int)$cfg['boss_cash_account']['id'];
+// Кассы сотрудников, которым руководитель может передать деньги (11.09.2026) — с подтверждением получателя
+$staffTargets = $isBoss ? [
+    'nodir'      => ['id' => 9,  'label' => $cfg['all_cash_accounts'][9]['label'] ?? 'Касса Нодира'],
+    'abdurashid' => ['id' => 15, 'label' => $cfg['all_cash_accounts'][15]['label'] ?? 'Касса Абдурашида'],
+] : [];
 
 // Куда можно передать: Суннатилла — шефу; шеф — на счета компании.
 $targets = [];
@@ -40,6 +46,9 @@ $messageType = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
+    // «Принял» / «Не принимаю» / «Отменить» — передачи с подтверждением (includes/cash_handover.php)
+    $hr = handover_handle_post($_POST, [$accId], (string)$me['name'], BOSS_API_USER_ID, fn($a, $c) => money($a, $c));
+    if ($hr) { flash_set($hr[0], $hr[1]); header('Location: cash.php'); exit; }
 
     if ($action === 'expense') {
         $r = boss_record_expense(
@@ -79,7 +88,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                       $r['ok'] ? 'ok' : 'err');
         } else {
             // сумма — в долларах из кассы; чего в кассе не хватает, записывается вложением
-            $bal = bank_account_balance_direct($accId);
+            $bal = handover_available($accId);   // без денег, уже переданных и ждущих подтверждения
             $fromCash = round(min($amt, max(0.0, floor($bal * 100) / 100)), 2);
             $rest = round($amt - $fromCash, 2);
             $conv = fn(float $usd) => $t['currency'] === 'USD' ? $usd : round($usd * $rate, 2);
@@ -112,6 +121,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $r = ['ok' => false, 'error' => 'Выберите, откуда забираете деньги.'];
         } elseif ($src['currency'] !== 'USD' && $rate <= 0) {
             $r = ['ok' => false, 'error' => "Укажите курс: сколько {$src['currency']} за 1 \$."];
+        } elseif ($srcKey === 'cash' && $amt > handover_available($accId) + 0.001) {
+            $r = ['ok' => false, 'error' => 'В кассе доступно только ' . money(handover_available($accId), $myCur) . ' — остальное уже передано и ждёт подтверждения.'];
         } else {
             $r = owner_withdraw((int)$src['id'], $src['currency'], $amt, $me['name'], trim($_POST['comment'] ?? ''),
                                 $src['currency'] === 'USD' ? null : $rate);
@@ -124,6 +135,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $r = owner_delete((int)($_POST['move_id'] ?? 0));
         flash_set($r['ok'] ? ($r['kind'] === 'in' ? 'Вложение убрано, деньги сняты со счёта компании.' : 'Изъятие убрано, деньги вернулись в кассу.') : $r['error'],
                   $r['ok'] ? 'ok' : 'err');
+        header('Location: cash.php');
+        exit;
+    } elseif ($isBoss && $action === 'give_staff') {
+        // Руководитель → касса Нодира/Абдурашида: ждёт подтверждения получателя (11.09.2026)
+        $t = $staffTargets[$_POST['target'] ?? ''] ?? null;
+        $source = ($_POST['source'] ?? 'cash') === 'own' ? 'own' : 'cash';
+        $amt = round((float)str_replace([' ', ','], ['', '.'], $_POST['amount'] ?? '0'), 2);
+        if (!$t) { flash_set('Выберите, кому передаёте.', 'err'); }
+        else {
+            $r = handover_create($accId, $acc['label'], (int)$t['id'], $t['label'], $amt, (string)$me['name'], trim($_POST['comment'] ?? ''), $source);
+            flash_set($r['ok'] ? 'Передача ' . money($r['amount'], $r['currency']) . ' — ' . $t['label'] . ' — ждёт подтверждения получателя. '
+                                 . ($source === 'own' ? 'Когда он подтвердит, сумма запишется как ваше вложение.' : 'Из вашей кассы она спишется, когда он подтвердит.')
+                               : $r['error'], $r['ok'] ? 'ok' : 'err');
+        }
+        header('Location: cash.php');
+        exit;
+    } elseif ($action === 'transfer' && ($_POST['target'] ?? '') === 'boss' && isset($targets['boss'])) {
+        // Сотрудник → касса руководителя: с подтверждением (11.09.2026)
+        $amt = round((float)str_replace([' ', ','], ['', '.'], $_POST['amount'] ?? '0'), 2);
+        $r = handover_create($accId, $acc['label'], (int)$targets['boss']['id'], $targets['boss']['label'], $amt, (string)$me['name'], trim($_POST['comment'] ?? ''));
+        flash_set($r['ok'] ? 'Передача ' . money($r['amount'], $r['currency']) . ' — ' . $targets['boss']['label']
+                             . ' — ждёт подтверждения. Из вашей кассы сумма спишется, когда получатель подтвердит.' : $r['error'], $r['ok'] ? 'ok' : 'err');
         header('Location: cash.php');
         exit;
     } elseif ($action === 'transfer') {
@@ -155,6 +188,10 @@ $flash = flash_get();
 if ($flash) { $message = $flash['message']; $messageType = $flash['type']; }
 
 $balance = $api->getAccountBalance($accId);
+$pendingOut = handover_pending_out($accId);
+$hIn = handover_list([$accId], [], ['pending']);
+$hOut = handover_list([], $isBoss ? [$accId, 0] : [$accId], ['pending', 'rejected', 'confirmed'], 10);
+if ($isBoss) $hOut = array_values(array_filter($hOut, fn($h) => (int)$h['from_account'] === $accId || $h['from_who'] === $me['name']));
 $lines = array_reverse($api->getBankLines($accId));   // свежие сверху
 $categories = boss_expense_categories();
 $myExpenses = boss_my_expenses($me['login']);
@@ -169,7 +206,12 @@ require __DIR__ . '/includes/layout_top.php';
 <div class="card">
   <h2><?= htmlspecialchars($acc['label']) ?></h2>
   <div style="font-size:30px; font-weight:700"><?= $balance === null ? '—' : money((float)$balance) ?></div>
+  <?php if ($pendingOut > 0.004): ?>
+    <div class="muted">из них <?= money($pendingOut) ?> передано и ждёт подтверждения — доступно <?= money((float)$balance - $pendingOut) ?></div>
+  <?php endif; ?>
 </div>
+
+<?= handover_render($hIn, $hOut, csrf_field(), fn($a, $c) => money($a, $c)) ?>
 
 <div class="grid-2col">
 <div>
@@ -231,6 +273,30 @@ require __DIR__ . '/includes/layout_top.php';
     <label>Комментарий <span class="muted">(необязательно)</span></label>
     <input type="text" name="comment" placeholder="например: на оплату ICMA">
     <button type="submit">Пополнить</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Передать сотруднику</h2>
+  <p class="muted" style="margin-top:0">Деньги в кассу Нодира или Абдурашида. Зачислятся, когда получатель
+    подтвердит, что принял; до этого их можно отменить.</p>
+  <form method="post" onsubmit="return appConfirmSubmit(this, 'Передать деньги сотруднику?');">
+  <?= csrf_field() ?>
+    <input type="hidden" name="action" value="give_staff">
+    <label>Кому</label>
+    <select name="target" required>
+      <?php foreach ($staffTargets as $k => $t): ?><option value="<?= $k ?>"><?= htmlspecialchars($t['label']) ?></option><?php endforeach; ?>
+    </select>
+    <label>Откуда деньги</label>
+    <label style="font-weight:400; display:flex; gap:8px"><input type="radio" name="source" value="cash" checked style="width:auto">
+      <span>Из моей кассы (доступно <?= money((float)$balance - $pendingOut) ?>)</span></label>
+    <label style="font-weight:400; display:flex; gap:8px"><input type="radio" name="source" value="own" style="width:auto">
+      <span>Мои личные деньги — <strong>вложение собственника</strong></span></label>
+    <label>Сумма, $</label>
+    <input type="number" name="amount" step="0.01" min="0.01" required>
+    <label>Комментарий <span class="muted">(необязательно)</span></label>
+    <input type="text" name="comment" placeholder="например: на таможню по ICMA">
+    <button type="submit">Передать</button>
   </form>
 </div>
 

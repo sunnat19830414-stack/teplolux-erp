@@ -58,6 +58,21 @@ require __DIR__ . '/includes/layout_top.php';
 <div>
 
 <?php
+  require_once __DIR__ . '/includes/cash_handover.php';
+  $hMine = (int)($_SESSION['user']['cash_account']['id'] ?? 0);
+  $hIn = $hMine ? handover_list([$hMine], [], ['pending']) : [];
+?>
+<?php if ($hIn): ?>
+<div class="card" style="border:2px solid #f59e0b">
+  <h2>Вам передали деньги — подтвердите</h2>
+  <?php foreach ($hIn as $h): ?>
+    <p style="margin:4px 0"><?= htmlspecialchars($h['from_who']) ?>: <strong><?= htmlspecialchars(money((float)$h['amount'], $h['currency'])) ?></strong>
+      <span class="muted">· <?= date('d.m H:i', strtotime($h['datec'])) ?></span></p>
+  <?php endforeach; ?>
+  <p style="margin-bottom:0"><a href="cash.php" class="btn small">Открыть «Моя касса»</a></p>
+</div>
+<?php endif; ?>
+<?php
   require_once __DIR__ . '/includes/pricing.php';
   pricing_ensure_table();
   $npRows = pricing_db()->query("SELECT r.fk_order, c.ref, s.nom, COUNT(*) n,

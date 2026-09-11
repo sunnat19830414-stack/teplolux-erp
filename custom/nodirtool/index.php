@@ -178,6 +178,20 @@ require __DIR__ . '/includes/layout_top.php';
 ?>
 
 <h1>Сводка — требует действия</h1>
+<?php
+  require_once __DIR__ . '/includes/cash_handover.php';
+  $hIn = $myCashAcc ? handover_list([(int)$myCashAcc['id']], [], ['pending']) : [];
+?>
+<?php if ($hIn): ?>
+<div class="card" style="border:2px solid #f59e0b">
+  <h2>Вам передали деньги — подтвердите</h2>
+  <?php foreach ($hIn as $h): ?>
+    <p style="margin:4px 0"><?= htmlspecialchars($h['from_who']) ?>: <strong><?= htmlspecialchars(money((float)$h['amount'], $h['currency'])) ?></strong>
+      <span class="muted">· <?= date('d.m H:i', strtotime($h['datec'])) ?><?= $h['comment'] ? ' · ' . htmlspecialchars($h['comment']) : '' ?></span></p>
+  <?php endforeach; ?>
+  <p style="margin-bottom:0"><a href="mycash.php" class="btn small">Открыть «Моя касса»</a></p>
+</div>
+<?php endif; ?>
 
 <div class="card">
   <h2>💰 Моя касса — неподтверждённые поступления</h2>

@@ -246,48 +246,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
             }
         }
-    } elseif ($action === 'handover_cash') {
+    } elseif (in_array($action, ['handover_cancel'], true)) {
+        require_once __DIR__ . '/includes/cash_handover.php';
         $cashAcc = $cfg['payment_accounts']['cash'] ?? null;
+        $hr = handover_handle_post($_POST, $cashAcc ? [(int)$cashAcc['id']] : [], 'Касса ' . $cfg['direction_label'], (int)$cfg['api_user_id'],
+                                   fn($a, $c) => number_format($a, 2) . ' $');
+        if ($hr) { flash_set($hr[0], $hr[1]); header('Location: debt.php'); exit; }
+    } elseif ($action === 'handover_cash') {
+        // С подтверждением получателя (11.09.2026, includes/cash_handover.php): касса НЕ обнуляется сразу —
+        // деньги спишутся, когда Нодир/Суннатилла нажмёт «Принял». До этого передачу можно отменить.
+        require_once __DIR__ . '/includes/cash_handover.php';
+        $cashAcc = $cfg['payment_accounts']['cash'] ?? null;
+        $recipient = $cfg['cash_recipient_label'] ?? '';
+        $recipientAccId = (int)($cfg['cash_recipient_account_id'] ?? 0);
         if (!$cashAcc) {
             $message = 'Не настроен кассовый счёт наличных.';
             $messageType = 'err';
         } else {
-            $balance = $api->getAccountBalance($cashAcc['id']);
-            if ($balance === null) {
-                $message = 'Не удалось получить остаток кассы: ' . $api->lastError;
-                $messageType = 'err';
-            } elseif ($balance <= 0.01) {
-                $message = 'В кассе и так пусто — нечего передавать.';
+            $r = handover_create((int)$cashAcc['id'], 'Касса ' . $cfg['direction_label'], $recipientAccId, $recipient,
+                                 null, 'Касса ' . $cfg['direction_label'], trim($_POST['comment'] ?? ''));
+            if (empty($r['ok'])) {
+                $message = 'Касса НЕ передана: ' . $r['error'];
                 $messageType = 'err';
             } else {
-                $recipient = trim($_POST['recipient'] ?? '') ?: ($cfg['cash_recipient_label'] ?? '');
-                $recipientAccId = $cfg['cash_recipient_account_id'] ?? null;
-                $label = 'Передача наличной кассы ' . $cfg['direction_label'] . ($recipient !== '' ? (' — принял: ' . $recipient) : '');
-
-                // LOW-пункт финансового аудита (05.09.2026): списание и зачисление теперь одной
-                // транзакцией. Раньше это были два отдельных вызова, и при сбое второго деньги
-                // уходили с кассы кассира никуда. Заодно сумма передачи и остаток берутся под
-                // блокировкой — два одновременных нажатия больше не передают одни и те же деньги
-                // дважды. Если счёт получателя не настроен, деньги теперь НЕ трогаются вообще
-                // (раньше списание уже происходило, а предупреждение приходило постфактум).
-                require_once __DIR__ . '/includes/bank_transfer.php';
-                $tr = bank_transfer([
-                    'from_account' => (int)$cashAcc['id'],
-                    'to_account'   => (int)($recipientAccId ?: 0),
-                    'amount'       => null,          // вся касса целиком
-                    'out_label'    => $label,
-                    'in_label'     => $label,
-                    'type'         => 'LIQ',
-                    'user_id'      => (int)$cfg['api_user_id'],
-                ]);
-                if (empty($tr['ok'])) {
-                    $message = 'Касса НЕ передана: ' . $tr['error'];
-                    $messageType = 'err';
-                } else {
-                    $message = 'Касса передана: ' . number_format($tr['amount'], 2) . ' $'
-                             . ($recipient !== '' ? (' → ' . $recipient) : '') . '. Остаток обнулён.';
-                    $messageType = 'ok';
-                }
+                flash_set('Касса ' . number_format($r['amount'], 2) . ' $ передана: ' . $recipient . '. Когда он подтвердит, что принял, '
+                          . 'остаток кассы уменьшится. До этого передачу можно отменить.', 'ok');
+                header('Location: debt.php');
+                exit;
             }
         }
     }
@@ -304,6 +289,10 @@ if ($flash) {
 // "передачи кассы" сразу показать обнулённый остаток, не дожидаясь отдельной перезагрузки
 $cashAcc = $cfg['payment_accounts']['cash'] ?? null;
 $cashBalance = $cashAcc ? $api->getAccountBalance($cashAcc['id']) : null;
+require_once __DIR__ . '/includes/cash_handover.php';
+$cashPending = $cashAcc ? handover_pending_out((int)$cashAcc['id']) : 0.0;
+$cashAvail = $cashBalance !== null ? round((float)$cashBalance - $cashPending, 2) : 0.0;
+$hOut = $cashAcc ? handover_list([], [(int)$cashAcc['id']], ['pending', 'rejected', 'confirmed'], 6) : [];
 
 $debtors = [];
 if (empty($_SESSION['debt_client'])) {
@@ -393,20 +382,23 @@ require __DIR__ . '/includes/layout_top.php';
       <div>
         <div style="font-size:26px; font-weight:700;"><?= number_format($cashBalance, 2) ?> $</div>
         <div class="muted">наличными в кассе сейчас</div>
+        <?php if ($cashPending > 0.004): ?>
+          <div class="muted">из них <?= number_format($cashPending, 2) ?> $ передано <?= htmlspecialchars($cfg['cash_recipient_label'] ?? '') ?> и ждёт подтверждения</div>
+        <?php endif; ?>
       </div>
-      <?php if ($cashBalance > 0.01): ?>
+      <?php if ($cashAvail > 0.01): ?>
       <form method="post" style="flex:0; display:flex; gap:8px; align-items:center"
-            onsubmit="return appConfirmSubmit(this, 'Передать кассу — обнулить остаток наличных (<?= number_format($cashBalance, 2) ?> $)?');">
+            onsubmit="return appConfirmSubmit(this, 'Передать кассу <?= number_format($cashAvail, 2) ?> $ — <?= htmlspecialchars($cfg['cash_recipient_label'] ?? '', ENT_QUOTES) ?>? Остаток уменьшится, когда он подтвердит, что принял.');">
         <?= csrf_field() ?>
         <input type="hidden" name="action" value="handover_cash">
-        <input type="text" name="recipient" placeholder="Кому передано"
-               value="<?= htmlspecialchars($cfg['cash_recipient_label'] ?? '') ?>" style="min-width:150px; margin:0">
-        <button type="submit" class="danger">Передать кассу</button>
+        <button type="submit" class="danger">Передать кассу <?= number_format($cashAvail, 2) ?> $ — <?= htmlspecialchars($cfg['cash_recipient_label'] ?? '') ?></button>
       </form>
       <?php endif; ?>
     </div>
   <?php endif; ?>
 </div>
+
+<?= handover_render([], $hOut, csrf_field(), fn($a, $c) => number_format($a, 2) . ' $') ?>
 
 <div class="card">
   <h2>Клиент</h2>
