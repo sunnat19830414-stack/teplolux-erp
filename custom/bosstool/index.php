@@ -57,6 +57,25 @@ require __DIR__ . '/includes/layout_top.php';
 <div class="grid-2col">
 <div>
 
+<?php
+  require_once __DIR__ . '/includes/pricing.php';
+  pricing_ensure_table();
+  $npRows = pricing_db()->query("SELECT r.fk_order, c.ref, s.nom, COUNT(*) n,
+        SUM(p.pmp > 0 AND p.price <= p.pmp) below
+      FROM llx_nt_price_review r JOIN llx_product p ON p.rowid = r.fk_product
+      JOIN llx_commande_fournisseur c ON c.rowid = r.fk_order JOIN llx_societe s ON s.rowid = c.fk_soc
+      WHERE r.status = 'open' GROUP BY r.fk_order ORDER BY r.fk_order")->fetch_all(MYSQLI_ASSOC);
+?>
+<?php if ($npRows): ?>
+<div class="card" style="border-color:#f59e0b">
+  <h2>Новый приход — проверьте цены</h2>
+  <?php foreach ($npRows as $np): ?>
+    <p style="margin:4px 0"><a href="new_prices.php"><?= htmlspecialchars($np['nom']) ?> · <?= htmlspecialchars($np['ref']) ?></a>:
+      <?= (int)$np['n'] ?> товар(ов)<?php if ((int)$np['below']): ?> — <span class="err"><?= (int)$np['below'] ?> ниже себестоимости, касса их не продаёт</span><?php endif; ?></p>
+  <?php endforeach; ?>
+</div>
+<?php endif; ?>
+
 <div class="card">
   <h2>Мои заявки на закупку</h2>
   <?php if (empty($myRequests)): ?>

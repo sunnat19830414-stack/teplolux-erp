@@ -156,6 +156,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // closeOrder всегда true: Dolibarr сам решает статус по факту накопленного количества —
             // если реально получено ещё не всё, он и так корректно оставит заказ "частично получен",
             // наш флаг влияет только на пограничный случай "получено ровно столько, сколько заказано"
+            // Цены нового прихода (11.09.2026): средняя себестоимость ДО приёмки — для руководства
+            require_once __DIR__ . '/includes/pricing.php';
+            $pmpBefore = pricing_pmp_snapshot(array_column($lines, 'fk_product'));
             $result = $api->receiveSupplierOrder($orderId, $lines, true, 'Приёмка через кассу ' . $cfg['direction_label']);
             if ($result === null) {
                 $message = ($rejectionNote ? $rejectionNote . "\n" : '') . 'Ошибка приёмки: ' . $api->lastError;
@@ -216,6 +219,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 require_once __DIR__ . '/includes/landed_cost.php';
                 $costRes = recompute_landed_cost_after_receipt($cfg, $orderId);
                 if (!empty($costRes['note'])) $message .= ' ' . $costRes['note'];
+                // принятые товары — в «Цены нового прихода» у руководства; сбой приёмку не отменяет
+                try { pricing_register_receipt($orderId, $pmpBefore); }
+                catch (Throwable $e) { $message .= ' (Не удалось передать приход на проверку цен: ' . $e->getMessage() . ' — сообщите Суннату.)'; }
 
                 $messageType = ($rejectionNote || empty($costRes['ok'])) ? 'err' : 'ok';
                 $_SESSION['receive_order_id'] = null; // назад к списку заказов

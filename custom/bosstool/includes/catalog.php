@@ -315,7 +315,9 @@ function catalog_save(mysqli $db, $api, array $caps, int $id, array $post, strin
     // Цена — отдельно и ПОСЛЕ фиксации остального: REST заводит строку в истории цен, и если он
     // упадёт, физические данные всё равно сохранятся, а про цену мы честно скажем.
     if (isset($restData['price']) && $api !== null) {
-        $res = $api->put('products/' . $id, ['price' => $restData['price']]);
+        // все три уровня сразу: с одним 'price' Dolibarr пишет в карточку прежнюю цену (includes/pricing.php)
+        require_once __DIR__ . '/pricing.php';
+        $res = $api->put('products/' . $id, pricing_levels_payload((float)$restData['price']));
         if ($res === null) {
             $errors[] = 'Цена продажи НЕ сохранена: ' . ($api->lastError ?? 'ошибка Dolibarr');
             unset($changed['price']);

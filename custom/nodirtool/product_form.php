@@ -59,6 +59,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $newId = (int)$newId;
             $kodSap = next_kod_sap($dir['prefix']);
             $efOk = $api->updateProductExtrafields($newId, ['kod_sap' => $kodSap, 'artikul' => $fields['ref']]);
+            if ($price > 0) {   // оптовая и розничная сразу от дилерской (11.09.2026)
+                require_once __DIR__ . '/includes/pricing.php';
+                pricing_sync_levels($newId, 4);
+            }
 
             if ($efOk === null) {
                 // Товар создан, но без кода направления его не увидит касса — говорим об этом прямо,

@@ -157,12 +157,14 @@ class DolibarrApi
      * Цена продажи товара. ⚠️ Это ровно та цена, по которой продаёт касса (TeplouxKassa берёт
      * `product.price`) — правка здесь сразу меняет цену для продавцов.
      */
+    /**
+     * Дилерская цена + оптовая (+5%) и розничная (+20%) одним запросом (11.09.2026). С одним 'price'
+     * Dolibarr 24 при включённых уровнях пишет в карточку ПРЕДЫДУЩУЮ цену — см. includes/pricing.php.
+     */
     public function saveSalePrice(int $productId, float $price): bool
     {
-        return $this->put("products/{$productId}", [
-            'price' => $price,
-            'price_base_type' => 'HT',
-        ]) !== null;
+        require_once __DIR__ . '/pricing.php';
+        return $this->put("products/{$productId}", pricing_levels_payload($price)) !== null;
     }
 
     public function updateProductExtrafields(int $id, array $options)

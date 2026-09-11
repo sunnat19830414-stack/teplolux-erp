@@ -634,6 +634,14 @@ function logistics_recompute_cost(string $scopeType, int $scopeId): array
             $qty, " . round($rawPricePerUnit, 4) . ", $landedCostPerUnit, '" . date('Y-m-d H:i:s') . "')");
     }
 
+    // Цены нового прихода (11.09.2026): если расходы внесли после проверки цен и товар ушёл ниже
+    // себестоимости — позиция снова в очереди у руководства, касса её не продаёт (includes/pricing.php).
+    // function_exists: этот файл подключает и касса, у которой своя копия pricing.php.
+    if ($affected) {
+        if (!function_exists('pricing_reopen_below_cost')) require_once __DIR__ . '/pricing.php';
+        pricing_reopen_below_cost(array_column($affected, 'fk_product'), $orderIds);
+    }
+
     return ['affected_products' => $affected];
 }
 

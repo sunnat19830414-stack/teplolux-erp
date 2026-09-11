@@ -72,8 +72,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // при обычной работе через интерфейс, но прямой POST мог подставить чужой товар/склад
             // другого направления). Цена/название берём из этого же свежего ответа, а не из формы.
             $freshProduct = $api->getProduct($productId, true);
+            require_once __DIR__ . '/includes/pricing.php';
+            $priceBlocked = is_array($freshProduct) ? pricing_blocked([$productId]) : [];
             if (!is_array($freshProduct) || !product_belongs_to_direction($freshProduct, $cfg['ref_prefix'])) {
                 $message = 'Этот товар не найден или относится к другому направлению.';
+                $messageType = 'err';
+            } elseif ($priceBlocked) {
+                // Вариант «б» (11.09.2026): после нового прихода цена стала не выше себестоимости —
+                // не продаём, пока руководство не поставит цену (includes/pricing.php).
+                $message = pricing_blocked_message($priceBlocked);
                 $messageType = 'err';
             } else {
                 $_SESSION['cart'][] = [
@@ -221,12 +228,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         foreach ($discountedCart as $item) { $cartTotalHt += $item['discounted_price'] * $item['qty']; }
         $cartTotalCheck = round($cartTotalHt * (1 + $cfg['vat_rate'] / 100), 2);
         $stockProblems = empty($_SESSION['cart']) ? [] : check_cart_stock($api, $cfg, $_SESSION['cart']);
+        // вариант «б»: товар мог попасть в корзину (или черновик) до того, как пришла новая партия
+        require_once __DIR__ . '/includes/pricing.php';
+        $priceBlocked = empty($_SESSION['cart']) ? [] : pricing_blocked(array_column($_SESSION['cart'], 'product_id'));
 
         if (empty($_SESSION['sale_client']['id'])) {
             $message = 'Сначала выберите клиента.';
             $messageType = 'err';
         } elseif (empty($_SESSION['cart'])) {
             $message = 'Корзина пуста.';
+            $messageType = 'err';
+        } elseif ($priceBlocked) {
+            $message = pricing_blocked_message($priceBlocked) . ' Уберите эти позиции из корзины или дождитесь новой цены — счёт НЕ создан.';
             $messageType = 'err';
         } elseif ($stockProblems) {
             // Документ НЕ создаётся вообще, если остатка не хватает хотя бы по одной позиции — раньше
