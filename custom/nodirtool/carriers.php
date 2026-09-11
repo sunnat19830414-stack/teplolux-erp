@@ -429,7 +429,7 @@ require __DIR__ . '/includes/layout_top.php';
 
 <?php endif; ?>
 
-<script src="assets/picker.js"></script>
+<script src="assets/picker.js?v=20260911"></script>
 <script>
 window.wireCarrierSearch && window.wireCarrierSearch('carrierSearch', 'carrierResults', function (c) {
   const form = document.createElement('form');

@@ -338,7 +338,7 @@ require __DIR__ . '/includes/layout_top.php';
   <?php endif; ?>
 </div>
 
-<script src="assets/picker.js"></script>
+<script src="assets/picker.js?v=20260911"></script>
 <script>
 function selectCarrierIntoExpenseForm(c) {
   const idInput = document.getElementById('expCarrierId');

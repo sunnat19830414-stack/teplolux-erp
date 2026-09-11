@@ -373,7 +373,7 @@ require __DIR__ . '/includes/layout_top.php';
 <?php endif; ?>
 
 <!-- Скрипт выпадающих списков (перевозчик, заказ, поставщик, товар). Без него поля поиска молчат, а форма требует выбрать перевозчика — замечание пользователя 11.09.2026. -->
-<script src="assets/picker.js"></script>
+<script src="assets/picker.js?v=20260911"></script>
 <script>
 // Валюта → показывать ли курс. Долг остаётся в валюте договорённости; курс нужен себестоимости.
 (function () {
@@ -414,6 +414,8 @@ require __DIR__ . '/includes/layout_top.php';
     orderId.value = o.id;
     document.getElementById('orderChosen').textContent = 'Выбран заказ ' + (o.ref || ('#' + o.id));
     sync();
+  }, function () {
+    orderId.value = ''; document.getElementById('orderChosen').textContent = ''; sync();
   });
   sync();
 })();
@@ -424,9 +426,13 @@ function selectCarrierIntoShipmentForm(c) {
   const chosenEl = document.getElementById('carrierChosen');
   if (!idEl || !chosenEl) return;          // мы на карточке рейса, формы создания нет
   idEl.value = c.id;
-  chosenEl.textContent = 'Выбран: ' + (c.name || ('#' + c.id));
+  chosenEl.textContent = '✓ Выбран: ' + (c.name || ('#' + c.id));
+  chosenEl.style.color = '#16a34a';
 }
-window.wireCarrierSearch && window.wireCarrierSearch('carrierSearch', 'carrierResults', selectCarrierIntoShipmentForm);
+window.wireCarrierSearch && window.wireCarrierSearch('carrierSearch', 'carrierResults', selectCarrierIntoShipmentForm, function () {
+  const idEl = document.getElementById('carrierId'); const ch = document.getElementById('carrierChosen');
+  if (idEl) idEl.value = ''; if (ch) ch.textContent = '';
+});
 <?php if ($justCreatedCarrier): ?>
 selectCarrierIntoShipmentForm(<?= json_encode($justCreatedCarrier, JSON_UNESCAPED_UNICODE) ?>);
 <?php endif; ?>

@@ -1,10 +1,29 @@
 // Общий живой поиск: текстовое поле + список результатов. Используется и для товаров, и для
 // поставщиков — endpoint и рендер результата настраиваются через data-атрибуты + window-колбэки.
 (function () {
-  function wireSearch(inputId, resultsId, endpoint, onPick, renderItem) {
+  // labelOf — для полей с ОДНИМ выбором (перевозчик, поставщик, заказ): после щелчка название
+  // встаёт в поле, список закрывается, рамка зеленеет. Без этого выбор срабатывал, но выглядел как
+  // «ничего не произошло» (замечание пользователя 11.09.2026). Для поиска товаров labelOf не
+  // передаётся — там добавляют несколько позиций подряд, и поле должно оставаться поисковым.
+  // onUnpick — вызывается, если после выбора начали печатать другое: старый id не должен молча
+  // уйти на сервер вместе с новым текстом.
+  function wireSearch(inputId, resultsId, endpoint, onPick, renderItem, labelOf, onUnpick) {
     const input = document.getElementById(inputId);
     const results = document.getElementById(resultsId);
     if (!input || !results) return;
+
+    function markPicked(label) {
+      input.value = label;
+      input.dataset.picked = label;
+      input.style.borderColor = '#16a34a';
+      input.style.boxShadow = '0 0 0 3px rgba(22,163,74,.15)';
+    }
+    function clearPicked() {
+      delete input.dataset.picked;
+      input.style.borderColor = '';
+      input.style.boxShadow = '';
+      if (onUnpick) onUnpick();
+    }
 
     let timer = null;
     function doSearch() {
@@ -22,7 +41,11 @@
             const div = document.createElement('div');
             div.className = 'search-result';
             div.innerHTML = renderItem(item);
-            div.addEventListener('click', () => onPick(item));
+            div.addEventListener('click', () => {
+              if (labelOf) markPicked(labelOf(item));
+              onPick(item);
+              if (labelOf) { results.innerHTML = ''; delete results.dataset.loaded; }
+            });
             results.appendChild(div);
           });
           if (items.length === 0) {
@@ -30,7 +53,10 @@
           }
         });
     }
-    input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(doSearch, 200); });
+    input.addEventListener('input', () => {
+      if (input.dataset.picked !== undefined && input.value !== input.dataset.picked) clearPicked();
+      clearTimeout(timer); timer = setTimeout(doSearch, 200);
+    });
     input.addEventListener('focus', () => { if (!results.dataset.loaded) { doSearch(); results.dataset.loaded = '1'; } });
   }
 
@@ -70,23 +96,26 @@
     wireSearch(inputId, resultsId, 'ajax_search_product.php', onPick, renderItem || window.renderProductLine);
   };
 
-  window.wireSupplierSearch = function (inputId, resultsId, onPick) {
+  window.wireSupplierSearch = function (inputId, resultsId, onPick, onUnpick) {
     wireSearch(inputId, resultsId, 'ajax_search_supplier.php', onPick, s =>
       '<strong>' + s.name.replace(/</g, '&lt;') + '</strong>' +
-      (s.code ? '<div class="muted">' + s.code.replace(/</g, '&lt;') + '</div>' : '')
+      (s.code ? '<div class="muted">' + s.code.replace(/</g, '&lt;') + '</div>' : ''),
+      s => s.name, onUnpick
     );
   };
 
-  window.wireCarrierSearch = function (inputId, resultsId, onPick) {
+  window.wireCarrierSearch = function (inputId, resultsId, onPick, onUnpick) {
     wireSearch(inputId, resultsId, 'ajax_search_carrier.php', onPick, c =>
-      '<strong>' + c.name.replace(/</g, '&lt;') + '</strong>'
+      '<strong>' + c.name.replace(/</g, '&lt;') + '</strong>',
+      c => c.name, onUnpick
     );
   };
 
-  window.wireOrderSearch = function (inputId, resultsId, onPick) {
+  window.wireOrderSearch = function (inputId, resultsId, onPick, onUnpick) {
     wireSearch(inputId, resultsId, 'ajax_search_order.php', onPick, o =>
       '<strong>' + o.ref.replace(/</g, '&lt;') + '</strong>' +
-      '<div class="muted">' + o.supplier.replace(/</g, '&lt;') + ' · ' + o.status_label.replace(/</g, '&lt;') + ' · ' + o.total_ttc.toFixed(2) + ' $</div>'
+      '<div class="muted">' + o.supplier.replace(/</g, '&lt;') + ' · ' + o.status_label.replace(/</g, '&lt;') + ' · ' + o.total_ttc.toFixed(2) + ' $</div>',
+      o => o.ref + ' — ' + o.supplier, onUnpick
     );
   };
 })();

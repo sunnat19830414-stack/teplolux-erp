@@ -853,7 +853,7 @@ $mailHistory = mail_log_for_order($id);
 </div>
 <?php endif; ?>
 
-<script src="assets/picker.js"></script>
+<script src="assets/picker.js?v=20260911"></script>
 <script>
 function selectCarrierIntoExpenseFormO(c) {
   const idInput = document.getElementById('expCarrierIdO');

@@ -672,7 +672,7 @@ require __DIR__ . '/includes/layout_top.php';
   });
 })();
 </script>
-<script src="assets/picker.js"></script>
+<script src="assets/picker.js?v=20260911"></script>
 <script>
 window.wireSupplierSearch('supplierSearch', 'supplierResults', function (s) {
   const form = document.createElement('form');
