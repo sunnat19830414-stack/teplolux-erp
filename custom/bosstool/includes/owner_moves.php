@@ -13,7 +13,7 @@
  *  - пополнение «из кассы» больше, чем в ней есть: из кассы уходит сколько есть, остальное — вложение
  *    (это делает cash.php, здесь две отдельные операции);
  *  - деньги компании, которые Умид забирает себе, = ИЗЪЯТИЕ собственника (решение пользователя):
- *    проводка «−сумма» с его кассы. Не расход компании — прибыль не уменьшает.
+ *    проводка «−сумма» с его кассы или со счёта компании. Не расход компании — прибыль не уменьшает.
  *
  * Каждая операция — строка в llx_nt_owner_move + проводка в llx_bank одной транзакцией. Подпись
  * проводки начинается с «Собственник:» — по ней отчёт «Деньги» отделяет вложения/изъятия от
@@ -93,18 +93,25 @@ function owner_contribute(int $toAccountId, string $toLabel, string $currency, f
     return owner_write('in', $toAccountId, $currency, $amount, $rate, $who, $comment, $label);
 }
 
-/** Изъятие: −сумма с кассы собственника; больше, чем в кассе, забрать нельзя. */
-function owner_withdraw(int $fromAccountId, string $currency, float $amount, string $who, string $comment = ''): array
+/**
+ * Изъятие: −сумма с кассы собственника или со счёта компании (11.09.2026 — «добавь изъятие со счёта
+ * компании»). Больше остатка забрать нельзя. $rate — единиц валюты счёта за 1 $, для не-долларовых.
+ */
+function owner_withdraw(int $fromAccountId, string $currency, float $amount, string $who, string $comment = '',
+                        ?float $rate = null): array
 {
     if (!acquire_named_lock('bank_transfer_acc_' . $fromAccountId)) {
         return ['ok' => false, 'error' => 'С этой кассой сейчас идёт другая операция — подождите несколько секунд и повторите.'];
     }
     $bal = bank_account_balance_direct($fromAccountId);
     if (round($amount, 2) > $bal + 0.001) {
-        return ['ok' => false, 'error' => 'В кассе только ' . number_format($bal, 2, '.', ' ') . ' — больше забрать нельзя.'];
+        return ['ok' => false, 'error' => 'На счёте только ' . number_format($bal, 2, '.', ' ') . ' ' . strtoupper($currency) . ' — больше забрать нельзя.'];
     }
     $label = OWNER_LABEL_PREFIX . 'изъятие (' . $who . ')' . ($comment !== '' ? ' — ' . $comment : '');
-    return owner_write('out', $fromAccountId, $currency, $amount, null, $who, $comment, $label);
+    if (strtoupper($currency) !== 'USD' && $rate > 0) {
+        $label .= ' (≈ ' . number_format($amount / $rate, 2, '.', '') . ' $ по курсу ' . rtrim(rtrim(number_format($rate, 4, '.', ''), '0'), '.') . ')';
+    }
+    return owner_write('out', $fromAccountId, $currency, $amount, strtoupper($currency) === 'USD' ? null : $rate, $who, $comment, $label);
 }
 
 /** Убрать ошибочную запись — вместе с её проводкой. */

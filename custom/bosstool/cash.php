@@ -103,9 +103,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         header('Location: cash.php');
         exit;
     } elseif ($isBoss && $action === 'withdraw') {
+        // Откуда: своя касса (по умолчанию) или любой счёт компании из того же списка, что и пополнение.
+        $srcKey = $_POST['from'] ?? 'cash';
+        $src = $srcKey === 'cash' ? ['id' => $accId, 'label' => 'касса', 'currency' => $myCur] : ($targets[$srcKey] ?? null);
         $amt = round((float)str_replace([' ', ','], ['', '.'], $_POST['amount'] ?? '0'), 2);
-        $r = owner_withdraw($accId, $myCur, $amt, $me['name'], trim($_POST['comment'] ?? ''));
-        flash_set($r['ok'] ? 'Изъятие собственника: ' . money($amt, $myCur) . ' из кассы. Это не расход компании.' : $r['error'], $r['ok'] ? 'ok' : 'err');
+        $rate = (float)str_replace([' ', ','], ['', '.'], $_POST['rate'] ?? '0');
+        if (!$src) {
+            $r = ['ok' => false, 'error' => 'Выберите, откуда забираете деньги.'];
+        } elseif ($src['currency'] !== 'USD' && $rate <= 0) {
+            $r = ['ok' => false, 'error' => "Укажите курс: сколько {$src['currency']} за 1 \$."];
+        } else {
+            $r = owner_withdraw((int)$src['id'], $src['currency'], $amt, $me['name'], trim($_POST['comment'] ?? ''),
+                                $src['currency'] === 'USD' ? null : $rate);
+        }
+        flash_set($r['ok'] ? 'Изъятие собственника: ' . money($amt, $src['currency']) . ($srcKey === 'cash' ? ' из кассы' : ' со счёта «' . $src['label'] . '»')
+                             . '. Это не расход компании.' : $r['error'], $r['ok'] ? 'ok' : 'err');
         header('Location: cash.php');
         exit;
     } elseif ($isBoss && $action === 'delete_owner_move') {
@@ -224,13 +236,25 @@ require __DIR__ . '/includes/layout_top.php';
 
 <div class="card">
   <h2>Забрать себе</h2>
-  <p class="muted" style="margin-top:0">Деньги компании из вашей кассы, которые вы забираете лично, — это
-    <strong>изъятие собственника</strong>, а не расход компании: прибыль оно не уменьшает.</p>
-  <form method="post" onsubmit="return appConfirmSubmit(this, 'Записать изъятие собственника из кассы?');">
+  <p class="muted" style="margin-top:0">Деньги компании, которые вы забираете лично — из кассы или со счёта
+    компании, — это <strong>изъятие собственника</strong>, а не расход компании: прибыль оно не уменьшает.</p>
+  <form method="post" onsubmit="return appConfirmSubmit(this, 'Записать изъятие собственника?');">
   <?= csrf_field() ?>
     <input type="hidden" name="action" value="withdraw">
-    <label>Сумма, <?= htmlspecialchars($myCur === 'USD' ? '$' : $myCur) ?></label>
-    <input type="number" name="amount" step="0.01" min="0.01" required>
+    <label>Откуда</label>
+    <select name="from" id="wdFrom">
+      <option value="cash" data-currency="<?= htmlspecialchars($myCur) ?>">Моя касса (<?= htmlspecialchars($myCur) ?>)</option>
+      <?php foreach ($targets as $k => $t): ?>
+        <option value="<?= htmlspecialchars($k) ?>" data-currency="<?= htmlspecialchars($t['currency']) ?>"><?= htmlspecialchars($t['label']) ?> (<?= htmlspecialchars($t['currency']) ?>)</option>
+      <?php endforeach; ?>
+    </select>
+    <label>Сумма, <span id="wdCur"><?= htmlspecialchars($myCur === 'USD' ? '$' : $myCur) ?></span></label>
+    <input type="number" name="amount" id="wdAmount" step="0.01" min="0.01" required>
+    <div id="wdRateBox" style="display:none">
+      <label>Курс: сколько <span id="wdRateCur"></span> за 1 $</label>
+      <input type="number" name="rate" id="wdRate" step="any" min="0">
+      <p class="muted" id="wdHint" style="margin:-4px 0 10px"></p>
+    </div>
     <label>Комментарий <span class="muted">(необязательно)</span></label>
     <input type="text" name="comment">
     <button type="submit" class="secondary">Забрать себе</button>
@@ -435,6 +459,22 @@ require __DIR__ . '/includes/layout_top.php';
   [sel, amt, rate].forEach(e => e.addEventListener('input', sync));
   sel.addEventListener('change', sync);
   document.querySelectorAll('input[name="source"]').forEach(e => e.addEventListener('change', sync));
+  sync();
+})();
+// Изъятие: сумма в валюте выбранного счёта, курс — для долларового итога
+(function () {
+  const sel = document.getElementById('wdFrom'), amt = document.getElementById('wdAmount');
+  const box = document.getElementById('wdRateBox'), rate = document.getElementById('wdRate');
+  const cur = document.getElementById('wdCur'), rc = document.getElementById('wdRateCur'), hint = document.getElementById('wdHint');
+  if (!sel) return;
+  function sync() {
+    const c = sel.options[sel.selectedIndex].dataset.currency || 'USD';
+    cur.textContent = c === 'USD' ? '$' : c; rc.textContent = c;
+    box.style.display = c === 'USD' ? 'none' : ''; rate.required = c !== 'USD';
+    const a = parseFloat(amt.value) || 0, r = parseFloat(rate.value) || 0;
+    hint.textContent = c !== 'USD' && a > 0 && r > 0 ? '≈ ' + (a / r).toLocaleString('ru-RU', {maximumFractionDigits: 2}) + ' $' : '';
+  }
+  sel.addEventListener('change', sync); amt.addEventListener('input', sync); rate.addEventListener('input', sync);
   sync();
 })();
 </script>
