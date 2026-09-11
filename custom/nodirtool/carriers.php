@@ -26,16 +26,7 @@ reset_selection_unless_preserved('selected_carrier');
 $message = '';
 $messageType = '';
 
-// Те же счета списания, что и в "Оплата поставщикам" — включая личную кассу текущего закупщика.
-$moneyAccounts = [];
-$myCashAcc = $cfg['personal_cash_accounts'][$_SESSION['user']['login']] ?? null;
-if ($myCashAcc) {
-    $moneyAccounts['mycash'] = ['id' => $myCashAcc['id'], 'label' => 'Моя касса (' . $myCashAcc['label'] . ')', 'currency' => 'USD'];
-}
-$moneyAccounts['uzs'] = ['id' => $cfg['uzs_account_id'], 'label' => 'Сумовый счёт (UZS-MAIN)', 'currency' => 'UZS'];
-foreach ($cfg['currency_accounts'] as $curCode => $accId) {
-    $moneyAccounts[strtolower($curCode)] = ['id' => $accId, 'label' => $curCode . '-MAIN', 'currency' => $curCode];
-}
+// Счета списания — includes/expense_accounts.php (своя касса, банк в сумах, валютные счета).
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
@@ -44,29 +35,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($action === 'clear_carrier') {
         $_SESSION['selected_carrier'] = null;
     } elseif ($action === 'pay_carrier') {
+        // Две суммы, если валюта счёта не совпадает с валютой долга (11.09.2026): раньше оплата рейса
+        // в 3 500 EUR долларами из кассы давала «долг 3 500 EUR и переплата 4 070 USD». См. carrier_pay().
+        require_once __DIR__ . '/includes/expense_accounts.php';
         $carrierId = (int)($_POST['carrier_id'] ?? 0);
-        $accKey = $_POST['account'] ?? '';
-        $acc = $moneyAccounts[$accKey] ?? null;
-        $amount = (float)($_POST['amount'] ?? 0);
-        $rate = $acc && $acc['currency'] !== 'USD' ? (float)($_POST['rate'] ?? 0) : null;
         $comment = trim($_POST['comment'] ?? '');
         $who = $_SESSION['user']['name'] ?? '';
+        $payAccounts = expense_payment_accounts(logistics_db(), $cfg, (string)($_SESSION['user']['login'] ?? ''));
+        $pay = expense_parse_payment($_POST, $payAccounts);
+        $shipmentId = (int)($_POST['shipment_id'] ?? 0) ?: null;
+        $debtAmount = (float)str_replace([' ', ','], ['', '.'], (string)($_POST['debt_amount'] ?? 0));
 
-        if (!$carrierId || !$acc) {
-            $message = 'Выберите счёт списания.';
-            $messageType = 'err';
+        if (!$carrierId) {
+            $r = ['ok' => false, 'error' => 'Перевозчик не выбран.'];
+        } elseif (!$pay['ok']) {
+            $r = ['ok' => false, 'error' => $pay['error']];
+        } elseif ($shipmentId) {
+            // рейс выбран — валюта долга и остаток берутся из рейса
+            $sh = shipment_get($shipmentId);
+            $r = (!$sh || (int)$sh['fk_carrier'] !== $carrierId)
+                ? ['ok' => false, 'error' => 'Этот рейс не принадлежит выбранному перевозчику.']
+                : shipment_pay($shipmentId, $pay['account'], $pay['currency'], $pay['amount'], $pay['rate'], $debtAmount, $who, $comment);
         } else {
-            // К какому рейсу относится оплата — необязательно (можно платить «в общий долг»),
-            // но если указан, в акте сверки будет видно, за какой инвойс заплатили (B6, 05.09.2026).
-            $shipmentId = (int)($_POST['shipment_id'] ?? 0) ?: null;
-            $r = logistics_record_carrier_payment($carrierId, $amount, $acc['currency'], $rate, (int)$acc['id'], $who, $comment, $shipmentId);
+            // «в общий долг» — валюту долга выбирает человек из тех, в которых перевозчик должен
+            $debtCur = strtoupper(trim((string)($_POST['debt_currency'] ?? ''))) ?: $pay['currency'];
+            $r = carrier_pay($carrierId, $pay['account'], $pay['currency'], $pay['amount'], $pay['rate'],
+                             $debtCur, $debtAmount, $who, $comment, null);
+        }
+        {
             if (!($r['ok'] ?? false)) {
                 $message = $r['error'] ?? 'Ошибка оплаты.';
                 $messageType = 'err';
             } else {
-                $message = ($r['overdraft_warning'] ?? '') . "Оплачено {$amount} " . ($acc['currency'] === 'UZS' ? 'сум' : $acc['currency']) .
-                    ($r['usd_amount'] != $amount ? " ({$r['usd_amount']} \$)" : '') . '.';
-                $messageType = !empty($r['overdraft_warning']) ? 'warn' : 'ok';
+                $message = ($r['warning'] ?? '') . $r['message'];
+                $messageType = !empty($r['warning']) ? 'warn' : 'ok';
                 $_SESSION['selected_carrier'] = ['id' => $carrierId, 'name' => $_SESSION['selected_carrier']['name'] ?? ''];
                 $_SESSION['_preserve_once']['selected_carrier'] = true;
                 flash_set($message, $messageType);
@@ -242,55 +244,96 @@ require __DIR__ . '/includes/layout_top.php';
   <div class="row">
     <div><div class="muted">Начислено</div><div style="font-size:20px; font-weight:700"><?= htmlspecialchars(money_by_currency($detail['charged_by_currency'])) ?></div></div>
     <div><div class="muted">Оплачено</div><div style="font-size:20px; font-weight:700"><?= htmlspecialchars(money_by_currency($detail['paid_by_currency'])) ?></div></div>
-    <div>
-      <div class="muted"><?= $detail['debt'] > 0 ? 'Долг' : ($detail['debt'] < 0 ? 'Переплата' : 'Баланс') ?></div>
-      <div style="font-size:20px; font-weight:700" class="<?= $detail['debt'] > 0.01 ? 'err' : 'ok' ?>"><?= htmlspecialchars(money_by_currency(array_map('abs', $detail['debt_by_currency']))) ?></div>
-    </div>
+    <?php
+      // Долг и переплата — по валютам, а не по долларовому итогу (11.09.2026): рейс в евро, оплаченный
+      // долларами по другому курсу, давал в долларах «переплату 27 $» при нулевом долге в евро.
+      $dOwe  = array_filter($detail['debt_by_currency'], fn($v) => $v > 0.01);
+      $dOver = array_filter($detail['debt_by_currency'], fn($v) => $v < -0.01);
+    ?>
+    <?php if ($dOwe): ?>
+      <div><div class="muted">Долг</div><div style="font-size:20px; font-weight:700" class="err"><?= htmlspecialchars(money_by_currency($dOwe)) ?></div></div>
+    <?php endif; ?>
+    <?php if ($dOver): ?>
+      <div><div class="muted">Переплата</div><div style="font-size:20px; font-weight:700" class="ok"><?= htmlspecialchars(money_by_currency(array_map('abs', $dOver))) ?></div></div>
+    <?php endif; ?>
+    <?php if (!$dOwe && !$dOver): ?>
+      <div><div class="muted">Долг</div><div style="font-size:20px; font-weight:700" class="ok">нет</div></div>
+    <?php endif; ?>
   </div>
 </div>
 
-<?php if ($detail['debt'] > 0.01): ?>
+<?php if (array_filter($detail['debt_by_currency'], fn($v) => $v > 0.01)): ?>
 <div class="card">
   <h2>Оплатить</h2>
-  <form method="post" class="row" style="align-items:end" id="carrierPayForm">
+  <?php
+    require_once __DIR__ . '/includes/expense_accounts.php';
+    $openShipments = array_filter(shipments_list((int)$detail['id'], 50), fn($sh) => $sh['status']['code'] !== 'paid');
+    $debtByCur = carrier_debt_by_currency((int)$detail['id'])[(int)$detail['id']] ?? [];
+    $debtByCur = array_filter($debtByCur, fn($v) => $v > 0.005);
+  ?>
+  <form method="post" id="carrierPayForm">
   <?= csrf_field() ?>
     <input type="hidden" name="action" value="pay_carrier">
     <input type="hidden" name="carrier_id" value="<?= $detail['id'] ?>">
-    <div>
-      <label>Счёт списания</label>
-      <select name="account" id="carrierPayAccount" onchange="document.getElementById('carrierPayRateBlock').style.display = this.options[this.selectedIndex].dataset.currency === 'USD' ? 'none' : '';">
-        <?php foreach ($moneyAccounts as $key => $acc): ?>
-          <option value="<?= $key ?>" data-currency="<?= htmlspecialchars($acc['currency']) ?>"><?= htmlspecialchars($acc['label']) ?></option>
-        <?php endforeach; ?>
-      </select>
+    <?= expense_payment_fields_html(logistics_db(),
+          expense_payment_accounts(logistics_db(), $cfg, (string)($_SESSION['user']['login'] ?? '')), 'C', 'по курсу') ?>
+    <div class="row">
+      <div>
+        <label>За какой рейс</label>
+        <select name="shipment_id" id="cpShip">
+          <option value="" data-cur="">— в общий долг —</option>
+          <?php foreach ($openShipments as $sh):
+                $shDue = (float)($sh['invoice_amount'] ?? $sh['agreed_amount']);
+                $shLeft = round($shDue - (float)$sh['paid_native'], 2); ?>
+            <option value="<?= (int)$sh['rowid'] ?>" data-cur="<?= htmlspecialchars(strtoupper($sh['currency'])) ?>" data-left="<?= $shLeft ?>">
+              №<?= (int)$sh['rowid'] ?> <?= htmlspecialchars(trim($sh['route_from'] . ' → ' . $sh['route_to'], ' →')) ?>
+              · осталось <?= htmlspecialchars(money($shLeft, $sh['currency'])) ?>
+            </option>
+          <?php endforeach; ?>
+        </select>
+      </div>
+      <div id="cpDebtCurBox">
+        <label>Какой долг закрываем</label>
+        <select name="debt_currency" id="cpDebtCur">
+          <?php foreach ($debtByCur as $c => $v): ?>
+            <option value="<?= htmlspecialchars($c) ?>" data-left="<?= round($v, 2) ?>"><?= htmlspecialchars($c) ?> — долг <?= htmlspecialchars(money($v, $c)) ?></option>
+          <?php endforeach; ?>
+          <?php if (!$debtByCur): ?><option value="">(долга нет)</option><?php endif; ?>
+        </select>
+      </div>
     </div>
-    <div>
-      <label>Сумма (в валюте счёта)</label>
-      <input type="number" step="0.01" min="0.01" name="amount" required>
-    </div>
-    <div id="carrierPayRateBlock" style="display:none">
-      <label>Курс (за 1$)</label>
-      <input type="number" step="0.0001" min="0.0001" name="rate">
-    </div>
-    <div>
-      <label>За какой рейс (необязательно)</label>
-      <?php $openShipments = array_filter(shipments_list((int)$detail['id'], 50),
-                                          fn($sh) => $sh['status']['code'] !== 'paid'); ?>
-      <select name="shipment_id">
-        <option value="">— в общий долг —</option>
-        <?php foreach ($openShipments as $sh): ?>
-          <option value="<?= (int)$sh['rowid'] ?>">
-            <?= htmlspecialchars(trim($sh['route_from'] . ' → ' . $sh['route_to'], ' →')) ?>
-            <?= $sh['invoice_number'] ? '· инвойс ' . htmlspecialchars($sh['invoice_number']) : '' ?>
-            (<?= htmlspecialchars(money((float)($sh['invoice_amount'] ?? $sh['agreed_amount']), $sh['currency'])) ?>)
-          </option>
-        <?php endforeach; ?>
-      </select>
+    <div id="cpDebtBox" style="display:none">
+      <label>Сколько <span id="cpDebtCurLbl"></span> этим закрыто</label>
+      <input type="number" step="0.01" min="0.01" name="debt_amount" id="cpDebtAmt">
+      <p class="muted" style="margin-top:-4px">Платите не в валюте долга — укажите, какую часть долга эта оплата закрывает
+        (по договорённости с перевозчиком). Иначе долг покажется в двух валютах сразу.</p>
     </div>
     <div><label>Комментарий (необязательно)</label><input type="text" name="comment"></div>
-    <div style="flex:0"><button type="submit">Оплатить</button></div>
+    <button type="submit">Оплатить</button>
   </form>
-  <script>document.getElementById('carrierPayAccount').dispatchEvent(new Event('change'));</script>
+  <script>
+  (function () {
+    const acc = document.getElementById('payAccC'), amt = document.getElementById('payAmtC');
+    const ship = document.getElementById('cpShip'), curBox = document.getElementById('cpDebtCurBox');
+    const curSel = document.getElementById('cpDebtCur'), box = document.getElementById('cpDebtBox');
+    const debt = document.getElementById('cpDebtAmt'), lbl = document.getElementById('cpDebtCurLbl');
+    function o(sel) { return sel.options[sel.selectedIndex] || {dataset: {}}; }
+    function sync() {
+      const byShip = !!ship.value;
+      curBox.style.display = byShip ? 'none' : '';
+      const debtCur = byShip ? o(ship).dataset.cur : curSel.value;
+      const left = parseFloat(byShip ? o(ship).dataset.left : o(curSel).dataset.left) || '';
+      const same = !debtCur || o(acc).dataset.cur === debtCur;
+      box.style.display = same ? 'none' : '';
+      debt.required = !same;
+      lbl.textContent = debtCur || '';
+      if (!same && !debt.value && left) debt.value = left;
+      if (same && !amt.value && left) amt.value = left;
+    }
+    [acc, ship, curSel].forEach(e => e.addEventListener('change', () => { debt.value = ''; sync(); }));
+    sync();
+  })();
+  </script>
 </div>
 <?php endif; ?>
 

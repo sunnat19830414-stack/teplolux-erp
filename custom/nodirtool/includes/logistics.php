@@ -302,7 +302,7 @@ function logistics_close_batch(int $batchId, bool $close = true): bool
  *
  * $carrierId (топ-5 пункт 3, 02.09.2026) — если указан, деньги СЕЙЧАС НЕ СПИСЫВАЮТСЯ: расход всё
  * равно немедленно влияет на себестоимость (как и раньше), но это становится долгом перед перевозчиком,
- * гасится отдельно через logistics_record_carrier_payment() (раздел "Перевозчики"). Без $carrierId
+ * гасится отдельно через carrier_pay() (раздел "Перевозчики" или «Оплатить рейс»). Без $carrierId
  * поведение ПОЛНОСТЬЮ прежнее — реальная проводка списания в момент ввода (сохранено ради обратной
  * совместимости с уже работающими типами расходов вроде "Таможня"/"Комиссия банка", которые обычно
  * платятся сразу, а не перевозчику).
@@ -392,70 +392,11 @@ function logistics_record_expense(
     return $result;
 }
 
-/**
- * Оплата перевозчику (топ-5 пункт 3) — реальное списание со счёта, отдельно от начисления расхода
- * (см. logistics_record_expense() выше). Может быть частичной/произвольной суммой, не привязана к
- * конкретному расходу — гасит общий долг (см. carrier_debt_by_currency() в includes/debt.php), тем же принципом, что и
- * оплата счетов поставщику (создали долг → потом оплатили, возможно по частям).
+/*
+ * Оплата перевозчику — carrier_pay() / shipment_pay() в includes/shipments.php (11.09.2026).
+ * Прежняя logistics_record_carrier_payment() удалена: она записывала оплату в валюте СЧЁТА, и рейс
+ * в 3 500 EUR, оплаченный долларами, показывался как «долг 3 500 EUR и переплата 4 070 USD».
  */
-function logistics_record_carrier_payment(
-    int $carrierId,
-    float $nativeAmount,
-    string $nativeCurrency,
-    ?float $rate,
-    int $accountId,
-    string $who,
-    string $comment = '',
-    ?int $shipmentId = null   // к какому рейсу/инвойсу относится оплата (B6, 05.09.2026)
-): array {
-    logistics_ensure_tables();
-    $db = logistics_db();
-
-    if ($nativeAmount <= 0) {
-        return ['ok' => false, 'error' => 'Сумма должна быть больше нуля.'];
-    }
-    // В отличие от logistics_record_expense() (только USD/UZS), сюда можно платить с любого из счетов
-    // проекта, включая EUR-MAIN — курс нужен для любой валюты, кроме USD, чтобы верно уменьшить долг,
-    // который всегда считается в USD.
-    if ($nativeCurrency !== 'USD' && (!$rate || $rate <= 0)) {
-        return ['ok' => false, 'error' => 'Укажите курс для пересчёта в доллары.'];
-    }
-    $usdAmount = $nativeCurrency === 'USD' ? round($nativeAmount, 2) : round($nativeAmount / $rate, 2);
-    $label = "Оплата перевозчику #$carrierId ($who)";
-    $now = date('Y-m-d H:i:s');
-
-    $overdraftWarning = '';
-    $resBal = $db->query("SELECT COALESCE(SUM(amount),0) as bal FROM llx_bank WHERE fk_account=" . (int)$accountId);
-    $balanceBefore = $resBal ? (float)$resBal->fetch_assoc()['bal'] : null;
-    if ($balanceBefore !== null && $nativeAmount > $balanceBefore + 0.01) {
-        $overdraftWarning = 'ВНИМАНИЕ: на счету было ' . number_format($balanceBefore, 2) . ' — после этой оплаты счёт уйдёт в минус. ';
-    }
-
-    $db->begin_transaction();
-
-    $r1 = $db->query("INSERT INTO llx_bank (datec, dateo, datev, amount, label, fk_account, fk_type, fk_user_author, rappro)
-        VALUES ('$now', '" . date('Y-m-d') . "', '" . date('Y-m-d') . "', -" . (float)$nativeAmount . ",
-        '" . $db->real_escape_string($label) . "', " . (int)$accountId . ", 'VIR', " . LOGISTICS_API_USER_ID . ", 0)");
-    if (!$r1) {
-        $db->rollback();
-        return ['ok' => false, 'error' => 'Ошибка проводки: ' . $db->error];
-    }
-    $bankId = (int)$db->insert_id;
-
-    $r2 = $db->query("INSERT INTO llx_carrier_payment
-        (fk_carrier, native_amount, native_currency, rate, usd_amount, fk_bank, datec, fk_user, comment, fk_shipment)
-        VALUES (" . (int)$carrierId . ", " . (float)$nativeAmount . ", '" . $db->real_escape_string($nativeCurrency) . "',
-        " . ($rate !== null ? (float)$rate : 'NULL') . ", $usdAmount, $bankId, '$now', " . LOGISTICS_API_USER_ID . ",
-        '" . $db->real_escape_string($comment) . "', " . ($shipmentId !== null ? (int)$shipmentId : 'NULL') . ")");
-    if (!$r2) {
-        $db->rollback();
-        return ['ok' => false, 'error' => 'Ошибка сохранения оплаты: ' . $db->error];
-    }
-
-    $db->commit();
-
-    return ['ok' => true, 'usd_amount' => $usdAmount, 'overdraft_warning' => $overdraftWarning];
-}
 
 /** Расходы, начисленные конкретному перевозчику (fk_carrier), по всем заказам/партиям сразу. */
 function logistics_get_carrier_expenses(int $carrierId): array

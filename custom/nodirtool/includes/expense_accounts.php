@@ -75,7 +75,8 @@ function expense_parse_payment(array $post, array $accounts): array
  * Поля формы «откуда оплачено / сумма / курс» + живой пересчёт в доллары. $suffix различает формы,
  * если их несколько на странице.
  */
-function expense_payment_fields_html(mysqli $db, array $accounts, string $suffix = ''): string
+function expense_payment_fields_html(mysqli $db, array $accounts, string $suffix = '',
+                                     string $usdHint = 'попадёт в себестоимость'): string
 {
     $defaults = [];
     foreach ($accounts as $id => $a) $defaults[$id] = expense_default_rate($db, $a['currency']);
@@ -123,7 +124,7 @@ function expense_payment_fields_html(mysqli $db, array $accounts, string $suffix
         const c = opt().dataset.cur, a = parseFloat(amt.value), r = parseFloat(rt.value);
         if (!(a > 0)) { usd.textContent = ''; return; }
         if (c === 'USD') { usd.textContent = ''; return; }
-        usd.textContent = r > 0 ? '≈ ' + (a / r).toLocaleString('ru-RU', {maximumFractionDigits: 2}) + ' $ попадёт в себестоимость' : 'укажите курс';
+        usd.textContent = r > 0 ? '≈ ' + (a / r).toLocaleString('ru-RU', {maximumFractionDigits: 2}) + ' $ <?= htmlspecialchars($usdHint) ?>' : 'укажите курс';
       }
       sel.addEventListener('change', () => sync(true));
       amt.addEventListener('input', calc); rt.addEventListener('input', calc);

@@ -15,7 +15,8 @@
  *    начисление долга (см. includes/logistics.php). Рейс лишь хранит ссылку на созданную строку.
  *  - Долг показывается в валюте договорённости (см. includes/debt.php, 05.09.2026).
  *    Курс нужен только для себестоимости — она считается в долларах.
- *  - Оплата перевозчику — там же, где была: `logistics_record_carrier_payment()`.
+ *  - Оплата перевозчику — `carrier_pay()` / `shipment_pay()` ниже: две суммы, если валюта счёта
+ *    не совпадает с валютой долга (11.09.2026).
  */
 
 require_once __DIR__ . '/logistics.php';
@@ -453,20 +454,77 @@ function shipments_for_orders(array $orderIds): array
 }
 
 /**
- * Оплата конкретного рейса (11.09.2026, замечание пользователя: «хочу оплатить фрахт — система
- * даёт выбрать транспортную компанию, хотя заказ уже привязан к перевозчику»).
+ * Оплата перевозчику с учётом валюты долга (11.09.2026, решение пользователя).
  *
- * Перевозчик, валюта и сумма известны из рейса — выбирать их заново не нужно.
- *
- * ⚠️ Главное здесь — валюта. Долг перевозчику считается в валюте договорённости (debt.php), и
- * оплата должна уменьшать долг В ЭТОЙ ЖЕ ВАЛЮТЕ. Раньше оплата записывалась в валюте счёта списания:
- * заплатили за рейс в 3 500 EUR долларами из кассы — и долг показывался как «должны 3 500 EUR и
- * переплатили 4 070 USD» вместо «долга нет». Поэтому две суммы:
- *   $bankAmount — сколько реально ушло со счёта, в валюте счёта (проводка в банке/кассе);
- *   $debtAmount — сколько этим закрыто долга, в валюте рейса (строка оплаты перевозчику).
- * Если валюты совпадают, это одно и то же число.
+ * Долг перевозчику ведётся в валюте договорённости (debt.php, carrier_debt_by_currency), а платят
+ * часто в другой: рейс в 3 500 EUR оплатили долларами из кассы или сумами с банка. Раньше оплата
+ * записывалась в валюте счёта — и долг показывался как «3 500 EUR и переплата 4 070 USD» вместо
+ * «долга нет», а в рейсе «оплачено 4 070 €». Поэтому две суммы:
+ *   $bankAmount — сколько реально ушло со счёта, в ЕГО валюте (проводка в банке/кассе);
+ *   $debtAmount — сколько этим закрыто долга, в валюте ДОЛГА (строка оплаты перевозчику).
+ * Сколько евро закрыто, вводит человек, а не программа: при наличной оплате курс договорной,
+ * и знает его только тот, кто договаривался. Если валюты совпадают — это одно число.
  *
  * $bankRate — «единиц валюты счёта за 1 $», нужен для долларового эквивалента, если счёт не в долларах.
+ *
+ * ⚠️ Не учитывается курсовая разница: фрахт в себестоимости зафиксирован при записи рейса (по курсу
+ * на тот момент). Если заплатили по другому курсу, разница в себестоимость сама не попадёт.
+ */
+function carrier_pay(int $carrierId, int $accountId, string $accountCurrency, float $bankAmount, ?float $bankRate,
+                     string $debtCurrency, float $debtAmount, string $who, string $comment = '',
+                     ?int $shipmentId = null): array
+{
+    $accountCurrency = strtoupper($accountCurrency);
+    $debtCurrency = strtoupper($debtCurrency) ?: 'USD';
+    if ($accountCurrency === $debtCurrency) $debtAmount = $bankAmount;   // одна валюта — одно число
+    $bankAmount = round($bankAmount, 2);
+    $debtAmount = round($debtAmount, 2);
+    if ($carrierId <= 0) return ['ok' => false, 'error' => 'Перевозчик не определён.'];
+    if ($bankAmount <= 0) return ['ok' => false, 'error' => 'Укажите, сколько ушло со счёта.'];
+    if ($debtAmount <= 0) return ['ok' => false, 'error' => "Укажите, сколько {$debtCurrency} этим закрыто."];
+    if ($accountCurrency !== 'USD' && (!$bankRate || $bankRate <= 0))
+        return ['ok' => false, 'error' => "Укажите курс {$accountCurrency} за 1 \$."];
+
+    // долларовый эквивалент — для сводок; берём с той стороны, где есть доллары
+    $usd = $accountCurrency === 'USD' ? $bankAmount
+         : ($debtCurrency === 'USD' ? $debtAmount : round($bankAmount / $bankRate, 2));
+
+    $db = logistics_db();
+    $bal = (float)$db->query("SELECT COALESCE(SUM(amount),0) b FROM llx_bank WHERE fk_account=" . (int)$accountId)->fetch_assoc()['b'];
+    $warn = $bankAmount > $bal + 0.01
+        ? 'ВНИМАНИЕ: на счету было ' . number_format($bal, 2, '.', ' ') . ' — после этой оплаты счёт ушёл в минус. ' : '';
+
+    $label = "Оплата перевозчику #{$carrierId}" . ($shipmentId ? ", рейс #{$shipmentId}" : '') . " ({$who})";
+    $now = date('Y-m-d H:i:s'); $today = date('Y-m-d'); $uid = LOGISTICS_API_USER_ID;
+    $fullComment = trim($comment . ($accountCurrency !== $debtCurrency
+        ? " [списано {$bankAmount} {$accountCurrency} за {$debtAmount} {$debtCurrency}]" : ''));
+    $db->begin_transaction();
+    try {
+        $st = $db->prepare("INSERT INTO llx_bank (datec, dateo, datev, amount, label, fk_account, fk_type, fk_user_author, rappro)
+                            VALUES (?, ?, ?, ?, ?, ?, 'VIR', ?, 0)");
+        $neg = -$bankAmount;
+        $st->bind_param('sssdsii', $now, $today, $today, $neg, $label, $accountId, $uid);
+        $st->execute(); $bankId = (int)$db->insert_id; $st->close();
+
+        $st = $db->prepare("INSERT INTO llx_carrier_payment
+            (fk_carrier, native_amount, native_currency, rate, usd_amount, fk_bank, datec, fk_user, comment, fk_shipment)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $st->bind_param('idsddisisi', $carrierId, $debtAmount, $debtCurrency, $bankRate, $usd, $bankId, $now, $uid, $fullComment, $shipmentId);
+        $st->execute(); $st->close();
+        $db->commit();
+    } catch (Throwable $e) {
+        $db->rollback();
+        return ['ok' => false, 'error' => 'Оплата не записана: ' . $e->getMessage()];
+    }
+    return ['ok' => true, 'warning' => $warn, 'bank_amount' => $bankAmount, 'debt_amount' => $debtAmount,
+            'message' => 'Оплачено ' . money($bankAmount, $accountCurrency) .
+                         ($accountCurrency !== $debtCurrency ? ' — закрыто ' . money($debtAmount, $debtCurrency) . ' долга' : '') . '.'];
+}
+
+/**
+ * Оплата конкретного рейса — из его карточки или из «Перевозчиков» с выбранным рейсом.
+ * Перевозчик и валюта долга берутся из рейса; оплатить больше остатка нельзя.
+ * Проверка остатка и запись — под одной блокировкой, иначе двойное нажатие оплатит дважды.
  */
 function shipment_pay(int $shipmentId, int $accountId, string $accountCurrency, float $bankAmount,
                       ?float $bankRate, float $debtAmount, string $who, string $comment = ''): array
@@ -478,59 +536,21 @@ function shipment_pay(int $shipmentId, int $accountId, string $accountCurrency, 
         $s = shipment_get($shipmentId);
         if (!$s) return ['ok' => false, 'error' => 'Рейс не найден.'];
         $debtCur = strtoupper((string)$s['currency']) ?: 'USD';
-        $accountCurrency = strtoupper($accountCurrency);
-        if ($accountCurrency === $debtCur) $debtAmount = $bankAmount;   // одна валюта — одно число
+        if (strtoupper($accountCurrency) === $debtCur) $debtAmount = $bankAmount;
 
-        $bankAmount = round($bankAmount, 2);
-        $debtAmount = round($debtAmount, 2);
-        if ($bankAmount <= 0) return ['ok' => false, 'error' => 'Укажите, сколько списано со счёта.'];
-        if ($debtAmount <= 0) return ['ok' => false, 'error' => "Укажите, сколько {$debtCur} этим закрыто."];
-        if ($accountCurrency !== 'USD' && (!$bankRate || $bankRate <= 0))
-            return ['ok' => false, 'error' => "Укажите курс {$accountCurrency} за 1 \$."];
-
-        // остаток по рейсу — под той же блокировкой, иначе двойное нажатие оплатит дважды
         $due = $s['invoice_amount'] !== null ? (float)$s['invoice_amount'] : (float)$s['agreed_amount'];
         $left = round($due - shipment_paid($shipmentId), 2);
-        if ($debtAmount > $left + 0.01)
+        if (round($debtAmount, 2) > $left + 0.01)
             return ['ok' => false, 'error' => 'По рейсу осталось оплатить ' . money($left, $debtCur) .
                    ' — больше закрыть нельзя. Если перевозчик выставил другую сумму, сначала запишите его инвойс.'];
 
-        $usd = $accountCurrency === 'USD' ? $bankAmount
-             : ($debtCur === 'USD' ? $debtAmount : round($bankAmount / $bankRate, 2));
-
-        $db = logistics_db();
-        $bal = (float)$db->query("SELECT COALESCE(SUM(amount),0) b FROM llx_bank WHERE fk_account=" . (int)$accountId)->fetch_assoc()['b'];
-        $warn = $bankAmount > $bal + 0.01
-            ? 'ВНИМАНИЕ: на счету было ' . number_format($bal, 2, '.', ' ') . ' — после этой оплаты счёт ушёл в минус. ' : '';
-
-        $carrierId = (int)$s['fk_carrier'];
-        $label = "Оплата перевозчику #{$carrierId}, рейс #{$shipmentId} ({$who})";
-        $now = date('Y-m-d H:i:s'); $today = date('Y-m-d');
-        $db->begin_transaction();
-        try {
-            $st = $db->prepare("INSERT INTO llx_bank (datec, dateo, datev, amount, label, fk_account, fk_type, fk_user_author, rappro)
-                                VALUES (?, ?, ?, ?, ?, ?, 'VIR', ?, 0)");
-            $neg = -$bankAmount; $uid = LOGISTICS_API_USER_ID;
-            $st->bind_param('sssdsii', $now, $today, $today, $neg, $label, $accountId, $uid);
-            $st->execute(); $bankId = (int)$db->insert_id; $st->close();
-
-            $st = $db->prepare("INSERT INTO llx_carrier_payment
-                (fk_carrier, native_amount, native_currency, rate, usd_amount, fk_bank, datec, fk_user, comment, fk_shipment)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-            $fullComment = trim($comment . ($accountCurrency !== $debtCur
-                ? " [списано {$bankAmount} {$accountCurrency} за {$debtAmount} {$debtCur}]" : ''));
-            $st->bind_param('idsddisisi', $carrierId, $debtAmount, $debtCur, $bankRate, $usd, $bankId, $now, $uid, $fullComment, $shipmentId);
-            $st->execute(); $st->close();
-            $db->commit();
-        } catch (Throwable $e) {
-            $db->rollback();
-            return ['ok' => false, 'error' => 'Оплата не записана: ' . $e->getMessage()];
+        $r = carrier_pay((int)$s['fk_carrier'], $accountId, $accountCurrency, $bankAmount, $bankRate,
+                         $debtCur, $debtAmount, $who, $comment, $shipmentId);
+        if (!empty($r['ok'])) {
+            $leftAfter = round($left - $r['debt_amount'], 2);
+            $r['message'] .= ' ' . ($leftAfter > 0.01 ? 'По рейсу осталось ' . money($leftAfter, $debtCur) . '.' : 'Рейс оплачен полностью.');
         }
-        $leftAfter = round($left - $debtAmount, 2);
-        return ['ok' => true, 'warning' => $warn,
-                'message' => 'Оплачено ' . money($bankAmount, $accountCurrency) .
-                             ($accountCurrency !== $debtCur ? ' — закрыто ' . money($debtAmount, $debtCur) : '') . '. ' .
-                             ($leftAfter > 0.01 ? 'По рейсу осталось ' . money($leftAfter, $debtCur) . '.' : 'Рейс оплачен полностью.')];
+        return $r;
     });
 }
 
