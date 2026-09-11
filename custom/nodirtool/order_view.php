@@ -31,6 +31,30 @@ if (!$id) {
 $message = '';
 $messageType = '';
 
+// Правки таблицы позиций без перезагрузки (assets/line_table.js, 11.09.2026): запрос с ajax=1
+// получает JSON, а не страницу. Итог — готовыми строками, в том же виде, что в шапке заказа.
+$isAjax = !empty($_POST['ajax']);
+function ov_json(array $r): void
+{
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($r, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+function ov_totals($order): ?array
+{
+    if (!is_array($order)) return null;
+    $cur = strtoupper(trim((string)($order['multicurrency_code'] ?? ''))) ?: 'USD';
+    $rate = (float)($order['multicurrency_tx'] ?? 1) ?: 1.0;
+    if ($cur !== 'USD') {
+        return ['main' => number_format((float)($order['multicurrency_total_ttc'] ?? 0), 2) . ' ' . $cur,
+                'sub' => '≈ ' . number_format((float)($order['total_ttc'] ?? 0), 2) . ' $ по курсу '
+                         . rtrim(rtrim(number_format($rate, 4, '.', ''), '0'), '.'),
+                'count' => count((array)($order['lines'] ?? []))];
+    }
+    return ['main' => number_format((float)($order['total_ttc'] ?? 0), 2) . ' $', 'sub' => '',
+            'count' => count((array)($order['lines'] ?? []))];
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
@@ -55,6 +79,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $messageType = 'err';
             } else {
                 save_purchase_price_with_history($api, $productId, (int)$order['socid'], $price, $_SESSION['user']['name'] ?? '', $ordCur, $ordRate);
+                if ($isAjax) ov_json(['ok' => true, 'key' => (int)$r, 'totals' => ov_totals($api->getSupplierOrder($id))]);
                 $message = 'Позиция добавлена.';
                 $messageType = 'ok';
                 // Позиция уже реально добавлена в заказ — редирект (POST → GET), чтобы F5 не отправил
@@ -77,7 +102,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     } elseif ($action === 'update_line') {
         require_once __DIR__ . '/includes/dolibarr_direct.php';
-        $lineId = (int)($_POST['line_id'] ?? 0);
+        $lineId = (int)($_POST['line_id'] ?? $_POST['key'] ?? 0);
         $qty = (float)($_POST['qty'] ?? 0);
         $price = (float)($_POST['price'] ?? 0);
         $desc = $_POST['desc'] ?? '';
@@ -95,14 +120,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $ordRate = (float)($order['multicurrency_tx'] ?? 1) ?: 1.0;
                     save_purchase_price_with_history($api, (int)($_POST['product_id'] ?? 0), (int)$order['socid'], $price, $_SESSION['user']['name'] ?? '', $ordCur, $ordRate);
                 }
+                if ($isAjax) {
+                    $ln = null;
+                    foreach ((array)($order['lines'] ?? []) as $l) if ((int)($l['id'] ?? 0) === $lineId) { $ln = $l; break; }
+                    $cur = strtoupper(trim((string)($order['multicurrency_code'] ?? ''))) ?: 'USD';
+                    $lq = (float)($ln['qty'] ?? $qty);
+                    $lp = $ln ? (float)($cur !== 'USD' ? $ln['multicurrency_subprice'] : $ln['subprice']) : $price;
+                    ov_json(['ok' => true, 'qty' => $lq, 'price' => $lp, 'line_total_raw' => round($lq * $lp, 2),
+                             'line_total' => number_format($lq * $lp, 2) . ' ' . currency_label($cur),
+                             'totals' => ov_totals($order)]);
+                }
+                // Без перезагрузки на верх страницы: возвращаемся к той же строке (якорь)
+                flash_set($message, $messageType);
+                header('Location: order_view.php?id=' . $id . '#line-' . $lineId);
+                exit;
             }
         }
-    } elseif ($action === 'delete_line') {
+    } elseif ($action === 'delete_line' || $action === 'delete_lines') {
+        // Одна строка (✕) или отмеченные галочками — одним запросом (11.09.2026).
         require_once __DIR__ . '/includes/dolibarr_direct.php';
-        $lineId = (int)($_POST['line_id'] ?? 0);
-        $r = dolibarr_delete_line($id, $lineId);
-        $message = $r['ok'] ? 'Позиция удалена.' : $r['error'];
-        $messageType = $r['ok'] ? 'ok' : 'err';
+        $keys = $action === 'delete_line' ? [(int)($_POST['line_id'] ?? 0)] : array_map('intval', (array)($_POST['keys'] ?? []));
+        $deleted = []; $errors = [];
+        foreach (array_unique(array_filter($keys)) as $k) {
+            $r = dolibarr_delete_line($id, $k);
+            if ($r['ok']) $deleted[] = $k; else $errors[] = $r['error'];
+        }
+        if ($isAjax) ov_json(['ok' => !$errors, 'error' => implode('; ', array_unique($errors)), 'deleted' => $deleted,
+                              'totals' => ov_totals($api->getSupplierOrder($id))]);
+        $message = $errors ? implode('; ', array_unique($errors)) : (count($deleted) > 1 ? 'Удалено позиций: ' . count($deleted) . '.' : 'Позиция удалена.');
+        $messageType = $errors ? 'err' : 'ok';
+        if (!$errors) { flash_set($message, $messageType); header('Location: order_view.php?id=' . $id); exit; }
     } elseif ($action === 'record_shortfall_debt') {
         // Недопоставка при ПРЕДОПЛАТЕ (03.09.2026, новая функция по итогам разговора с Нодиром):
         // заплатили за N штук, приехало меньше — разница физически остаётся нашей предоплатой у
@@ -332,17 +379,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message = 'Удалить целиком можно только черновик.';
             $messageType = 'err';
         } else {
-            $ok = $api->deleteSupplierOrder($id);
-            if (!$ok) {
-                $message = 'Ошибка удаления: ' . $api->lastError;
+            // К черновику могли успеть привязать логистику (переоткрытый заказ) — такие данные не
+            // бросаем сиротами: по ним уже есть долг перевозчику или списанные деньги.
+            require_once __DIR__ . '/includes/logistics.php';
+            $ldb = logistics_db();
+            $deps = [];
+            if (logistics_get_expenses('order', $id)) $deps[] = 'логистические расходы';
+            if ((int)$ldb->query("SELECT COUNT(*) n FROM llx_nt_shipment WHERE scope_type='order' AND scope_id=" . (int)$id)->fetch_assoc()['n']) $deps[] = 'рейс';
+            if ($ldb->query("SELECT 1 FROM llx_supplier_shipment_batch_order WHERE fk_order=" . (int)$id)->num_rows) $deps[] = 'партия';
+            if ($ldb->query("SHOW TABLES LIKE 'llx_nt_claim'")->num_rows
+                && (int)$ldb->query("SELECT COUNT(*) n FROM llx_nt_claim WHERE fk_order=" . (int)$id)->fetch_assoc()['n']) $deps[] = 'рекламация';
+            if ($deps) {
+                $message = 'Черновик не удалён: к нему привязаны ' . implode(', ', $deps) . '. Сначала уберите их или оставьте заказ.';
                 $messageType = 'err';
             } else {
-                header('Location: orders.php');
-                exit;
+                require_once __DIR__ . '/includes/dolibarr_direct.php';
+                $r = dolibarr_delete_draft($id);
+                if (!$r['ok']) {
+                    $message = $r['error'];
+                    $messageType = 'err';
+                } else {
+                    // Заказ был собран из заявки руководства — возвращаем её в список заявок, иначе
+                    // шеф видел бы «заказ оформлен» со ссылкой в никуда.
+                    $back = '';
+                    if ($ldb->query("SHOW TABLES LIKE 'llx_boss_request'")->num_rows) {
+                        $rq = $ldb->query("SELECT rowid FROM llx_boss_request WHERE fk_order=" . (int)$id)->fetch_all(MYSQLI_ASSOC);
+                        if ($rq) {
+                            $ldb->query("UPDATE llx_boss_request SET status='sent', fk_order=NULL, taken_by=NULL, taken_at=NULL, closed_at=NULL WHERE fk_order=" . (int)$id);
+                            $back = ' Заявка №' . implode(', №', array_column($rq, 'rowid')) . ' вернулась в «Заявки от руководства».';
+                        }
+                    }
+                    flash_set('Черновик заказа удалён.' . $back, 'ok');
+                    header('Location: orders.php');
+                    exit;
+                }
             }
         }
     }
 }
+
+if ($isAjax) ov_json(['ok' => $messageType !== 'err', 'error' => $message]);
 
 $flash = flash_get();
 if ($flash) {
@@ -419,13 +495,10 @@ require __DIR__ . '/includes/layout_top.php';
       <?php if (stripos((string)($order['note_private'] ?? ''), '[NodirTool] Заказ переоткрыт') !== false): ?>
         <div><span class="warn" style="font-size:12px">были правки после отправки поставщику</span></div>
       <?php endif; ?>
+      <?php $ovT = ov_totals($order); ?>
       <div style="font-size:19px; font-weight:700; margin-top:6px;">
-        <?php if ($orderCurrency !== 'USD'): ?>
-          <?= number_format((float)($order['multicurrency_total_ttc'] ?? 0), 2) ?> <?= htmlspecialchars($orderCurrency) ?>
-          <div class="muted" style="font-size:13px; font-weight:400">≈ <?= number_format((float)($order['total_ttc'] ?? 0), 2) ?> $ по курсу <?= rtrim(rtrim(number_format($orderRate, 4, '.', ''), '0'), '.') ?></div>
-        <?php else: ?>
-          <?= number_format((float)($order['total_ttc'] ?? 0), 2) ?> $
-        <?php endif; ?>
+        <span id="ovTotalMain"><?= htmlspecialchars($ovT['main']) ?></span>
+        <div class="muted" style="font-size:13px; font-weight:400" id="ovTotalSub"><?= htmlspecialchars($ovT['sub']) ?></div>
       </div>
       <?php if ($canReopen): ?>
         <form method="post" id="reopenForm" style="margin-top:8px" onsubmit="return submitReopen(this);">
@@ -551,12 +624,26 @@ $mailHistory = mail_log_for_order($id);
 </div>
 
 <div class="card">
-  <h2>Позиции</h2>
+  <h2>Позиции (<span id="ovCount"><?= count((array)($order['lines'] ?? [])) ?></span>)</h2>
   <?php if (empty($order['lines'])): ?>
     <p class="muted">Пусто.</p>
-  <?php elseif ($isDraft): ?>
-    <table>
-      <tr><th>Товар</th><th>Кол-во</th><th>Цена, <?= htmlspecialchars($orderCurLabel) ?></th><th>Сумма</th><th></th></tr>
+  <?php else: ?>
+    <?php if ($isDraft): ?>
+      <div class="row" style="align-items:center; margin-bottom:6px">
+        <p class="muted" style="margin:0">Количество и цена сохраняются сами, как только выйдете из поля — страница
+          не перезагружается. Щёлкните заголовок столбца, чтобы отсортировать. Красным — позиции без цены.</p>
+        <div style="flex:0"><button type="button" class="danger small" id="ovBulkDel" style="display:none; white-space:nowrap">Удалить отмеченные</button></div>
+      </div>
+    <?php endif; ?>
+    <div style="overflow-x:auto">
+    <table class="nt-lines" id="ovLines">
+      <thead><tr>
+        <?php if ($isDraft): ?><th style="width:28px"><input type="checkbox" class="nt-check-all" title="Отметить все" style="width:auto"></th><?php endif; ?>
+        <th data-sort="ref">Артикул</th><th data-sort="name">Наименование</th><th data-sort="qty">Кол-во</th>
+        <th data-sort="price">Цена, <?= htmlspecialchars($orderCurLabel) ?></th><th data-sort="sum">Сумма</th>
+        <?php if ($isDraft): ?><th></th><?php endif; ?>
+      </tr></thead>
+      <tbody>
       <?php foreach ($order['lines'] as $l):
         $lineId = (int)($l['id'] ?? 0);
         $qty = (float)($l['qty'] ?? 0);
@@ -564,61 +651,45 @@ $mailHistory = mail_log_for_order($id);
         $pu = $orderCurrency !== 'USD'
             ? (float)($l['multicurrency_subprice'] ?? 0)
             : (float)($l['subprice'] ?? 0);
+        $lRef = (string)($l['ref'] ?? $l['product_ref'] ?? '');
+        $lName = (string)($l['product_label'] ?? $l['desc'] ?? '');
+        $lDesc = (string)($l['desc'] ?? $l['product_label'] ?? '');
+        $hist = 'price_history_view.php?product_id=' . (int)($l['fk_product'] ?? 0) . '&supplier_id=' . (int)$order['socid'];
       ?>
-        <tr>
-          <td><?= htmlspecialchars($l['product_label'] ?? $l['desc'] ?? '') ?><div class="muted"><?= htmlspecialchars($l['ref'] ?? $l['product_ref'] ?? '') ?></div></td>
-          <td>
-            <form method="post" style="display:flex; gap:4px">
-  <?= csrf_field() ?>
-              <input type="hidden" name="action" value="update_line">
-              <input type="hidden" name="line_id" value="<?= $lineId ?>">
-              <input type="hidden" name="desc" value="<?= htmlspecialchars($l['desc'] ?? $l['product_label'] ?? '') ?>">
-              <input type="hidden" name="product_id" value="<?= (int)($l['fk_product'] ?? 0) ?>">
-              <input type="hidden" name="price" value="<?= htmlspecialchars((string)$pu) ?>">
-              <input type="number" name="qty" value="<?= htmlspecialchars((string)$qty) ?>" step="any" min="0.001" style="width:70px; margin:0" onchange="this.form.submit()">
-            </form>
-          </td>
-          <td>
-            <form method="post" style="display:flex; gap:4px">
-  <?= csrf_field() ?>
-              <input type="hidden" name="action" value="update_line">
-              <input type="hidden" name="line_id" value="<?= $lineId ?>">
-              <input type="hidden" name="desc" value="<?= htmlspecialchars($l['desc'] ?? $l['product_label'] ?? '') ?>">
-              <input type="hidden" name="product_id" value="<?= (int)($l['fk_product'] ?? 0) ?>">
-              <input type="hidden" name="qty" value="<?= htmlspecialchars((string)$qty) ?>">
-              <input type="number" name="price" value="<?= htmlspecialchars((string)$pu) ?>" step="0.01" min="0" style="width:80px; margin:0" onchange="this.form.submit()">
-            </form>
-            <a class="muted" style="font-size:12px" href="price_history_view.php?product_id=<?= (int)($l['fk_product'] ?? 0) ?>&supplier_id=<?= (int)$order['socid'] ?>">🕘 история цены</a>
-          </td>
-          <td><?= number_format($qty * $pu, 2) ?> <?= htmlspecialchars($orderCurLabel) ?></td>
-          <td>
-            <form method="post" onsubmit="return appConfirmSubmit(this, 'Удалить эту позицию?');">
-  <?= csrf_field() ?>
-              <input type="hidden" name="action" value="delete_line">
-              <input type="hidden" name="line_id" value="<?= $lineId ?>">
-              <button type="submit" class="secondary small">✕</button>
-            </form>
-          </td>
+        <tr id="line-<?= $lineId ?>" data-key="<?= $lineId ?>" data-product="<?= (int)($l['fk_product'] ?? 0) ?>"
+            data-ref="<?= htmlspecialchars($lRef) ?>" data-name="<?= htmlspecialchars($lName) ?>" data-desc="<?= htmlspecialchars($lDesc) ?>"
+            data-qty="<?= $qty ?>" data-price="<?= $pu ?>" data-sum="<?= round($qty * $pu, 2) ?>">
+          <?php if ($isDraft): ?><td><input type="checkbox" class="nt-check" style="width:auto"></td><?php endif; ?>
+          <td style="white-space:nowrap"><?= htmlspecialchars($lRef) ?></td>
+          <td><?= htmlspecialchars($lName) ?></td>
+          <?php if ($isDraft): ?>
+            <td><input type="number" class="nt-edit" data-field="qty" value="<?= htmlspecialchars((string)$qty) ?>" step="any" min="0.001"></td>
+            <td style="white-space:nowrap"><input type="number" class="nt-edit" data-field="price" value="<?= htmlspecialchars((string)$pu) ?>" step="any" min="0">
+              <a class="muted" style="font-size:12px" href="<?= $hist ?>" title="История цены">🕘</a></td>
+          <?php else: ?>
+            <td><?= htmlspecialchars((string)$qty) ?></td>
+            <td style="white-space:nowrap"><?= number_format($pu, 2) ?> <a class="muted" style="font-size:12px" href="<?= $hist ?>" title="История цены">🕘</a></td>
+          <?php endif; ?>
+          <td class="nt-sum" style="white-space:nowrap"><?= number_format($qty * $pu, 2) ?> <?= htmlspecialchars($orderCurLabel) ?></td>
+          <?php if ($isDraft): ?><td><button type="button" class="secondary small nt-del" title="Удалить позицию">✕</button></td><?php endif; ?>
         </tr>
       <?php endforeach; ?>
+      </tbody>
     </table>
-  <?php else: ?>
-    <table>
-      <tr><th>Товар</th><th>Кол-во</th><th>Цена, <?= htmlspecialchars($orderCurLabel) ?></th><th>Сумма</th></tr>
-      <?php foreach ($order['lines'] as $l):
-        $qty = (float)($l['qty'] ?? 0);
-        $pu = $orderCurrency !== 'USD'
-            ? (float)($l['multicurrency_subprice'] ?? 0)
-            : (float)($l['subprice'] ?? 0);
-      ?>
-        <tr>
-          <td><?= htmlspecialchars($l['product_label'] ?? $l['desc'] ?? '') ?><div class="muted"><?= htmlspecialchars($l['ref'] ?? $l['product_ref'] ?? '') ?></div></td>
-          <td><?= htmlspecialchars((string)$qty) ?></td>
-          <td><?= number_format($pu, 2) ?> <?= htmlspecialchars($orderCurLabel) ?> <a class="muted" style="font-size:12px" href="price_history_view.php?product_id=<?= (int)($l['fk_product'] ?? 0) ?>&supplier_id=<?= (int)$order['socid'] ?>">🕘</a></td>
-          <td><?= number_format($qty * $pu, 2) ?> <?= htmlspecialchars($orderCurLabel) ?></td>
-        </tr>
-      <?php endforeach; ?>
-    </table>
+    </div>
+    <script src="assets/line_table.js?v=20260911"></script>
+    <script>
+    ntLineTable(document.getElementById('ovLines'), {
+      endpoint: 'order_view.php', csrf: <?= json_encode(csrf_token()) ?>, extra: {id: <?= (int)$id ?>},
+      update: 'update_line', remove: 'delete_lines', undo: 'add_line', storeKey: 'nt_sort_order_lines',
+      bulkButton: document.getElementById('ovBulkDel'),
+      onTotals: t => {
+        document.getElementById('ovTotalMain').textContent = t.main;
+        document.getElementById('ovTotalSub').textContent = t.sub;
+        document.getElementById('ovCount').textContent = t.count;
+      }
+    });
+    </script>
   <?php endif; ?>
 
   <?php if ($isDraft): ?>

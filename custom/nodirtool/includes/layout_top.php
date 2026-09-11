@@ -59,6 +59,21 @@
   th { color: var(--muted); font-weight: 500; font-size: 12.5px; text-transform: uppercase; letter-spacing: .03em; }
   .muted { color: var(--muted); font-size: 13px; }
   .ok { color: var(--ok); font-weight: 600; }
+  /* Таблица позиций заказа (assets/line_table.js, 11.09.2026) */
+  .nt-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+  .nt-sortable::after { content: ' ↕'; color: var(--muted); font-size: 11px; }
+  .nt-sortable[data-dir="asc"]::after { content: ' ▲'; color: var(--accent); }
+  .nt-sortable[data-dir="desc"]::after { content: ' ▼'; color: var(--accent); }
+  table.nt-lines input.nt-edit { width: 96px; margin: 0; padding: 6px 8px; font-size: 14px; }
+  table.nt-lines td { vertical-align: middle; }
+  tr.nt-noprice td { background: var(--danger-bg); }
+  tr.nt-saved td { background: #dcfce7; }
+  tr.nt-failed td { background: var(--danger-bg); }
+  .nt-toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); display: none; gap: 12px;
+    align-items: center; background: #1f2430; color: #fff; padding: 10px 16px; border-radius: 10px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.25); z-index: 1000; font-size: 14px; max-width: 90vw; }
+  .nt-toast .err { color: #fca5a5; }
+  .nt-toast button { padding: 6px 12px; }
   .err { color: var(--danger); font-weight: 600; }
   .warn { color: var(--warn); font-weight: 600; background: var(--warn-bg); padding: 8px 12px; border-radius: 8px; display: inline-block; }
 
