@@ -106,10 +106,12 @@ function report_money(DolibarrApi $api, array $cfg, string $from, string $to, ar
             continue;
         }
         $lines = $api->getBankLinesBetween((int)$accId, $from, $to);
-        $accIn = 0.0; $accOut = 0.0; $accMoved = 0.0;
+        $accIn = 0.0; $accOut = 0.0; $accMoved = 0.0; $accOwner = 0.0;
         foreach ($lines as $l) {
             $amt = (float)($l['amount'] ?? 0);
             $label = (string)($l['label'] ?? '');
+            // Вложения и изъятия собственника (11.09.2026) — не выручка и не расход компании.
+            if (mb_strpos($label, 'Собственник: ') === 0) { $accOwner += $amt; continue; }
             $isTransfer = (mb_stripos($label, 'Передача') !== false) || (mb_stripos($label, 'Получено от') !== false)
                 || (mb_stripos($label, 'Конвертация') !== false);
             if ($isTransfer) { $accMoved += abs($amt); continue; }
@@ -120,10 +122,12 @@ function report_money(DolibarrApi $api, array $cfg, string $from, string $to, ar
         $byAccount[$accId] = [
             'label' => $meta['label'], 'currency' => $cur,
             'in' => round($accIn, 2), 'out' => round($accOut, 2),
-            'moved' => round($accMoved, 2), 'balance' => $balance === null ? null : round((float)$balance, 2),
+            'moved' => round($accMoved, 2), 'owner' => round($accOwner, 2),
+            'balance' => $balance === null ? null : round((float)$balance, 2),
         ];
 
-        if (!isset($byCurrency[$cur])) $byCurrency[$cur] = ['in' => 0.0, 'out' => 0.0, 'moved' => 0.0, 'balance' => 0.0];
+        if (!isset($byCurrency[$cur])) $byCurrency[$cur] = ['in' => 0.0, 'out' => 0.0, 'moved' => 0.0, 'owner' => 0.0, 'balance' => 0.0];
+        $byCurrency[$cur]['owner'] += $accOwner;
         $byCurrency[$cur]['in'] += $accIn;
         $byCurrency[$cur]['out'] += $accOut;
         $byCurrency[$cur]['moved'] += $accMoved;
@@ -134,7 +138,7 @@ function report_money(DolibarrApi $api, array $cfg, string $from, string $to, ar
         $byCurrency[$cur] = [
             'in' => round($v['in'], 2), 'out' => round($v['out'], 2),
             'diff' => round($v['in'] - $v['out'], 2),
-            'moved' => round($v['moved'], 2), 'balance' => round($v['balance'], 2),
+            'moved' => round($v['moved'], 2), 'owner' => round($v['owner'], 2), 'balance' => round($v['balance'], 2),
         ];
     }
     // Доллары первыми — это основная валюта компании.
