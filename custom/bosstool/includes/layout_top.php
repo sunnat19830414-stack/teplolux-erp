@@ -211,6 +211,9 @@
         $__np = (int)pricing_db()->query("SELECT COUNT(*) n FROM llx_nt_price_review WHERE status = 'open'")->fetch_assoc()['n'];
       ?>
       <a href="new_prices.php" class="<?= $__page === 'new_prices.php' ? 'active' : '' ?>">Цены нового прихода<?php if ($__np): ?> <span class="badge badge-warn" style="margin-left:4px"><?= $__np ?></span><?php endif; ?></a>
+      <?php if (($_SESSION['user']['direction'] ?? null) === null): ?>
+      <a href="price_settings.php" class="<?= $__page === 'price_settings.php' ? 'active' : '' ?>">Наценки: опт и розница</a>
+      <?php endif; ?>
       <a href="stock_prices.php" class="<?= $__page === 'stock_prices.php' ? 'active' : '' ?>">Склад: цены</a>
       <a href="catalog.php" class="<?= in_array($__page, ['catalog.php', 'product_card.php'], true) ? 'active' : '' ?>">Каталог товаров</a>
       <a href="report_money.php" class="<?= $__page === 'report_money.php' ? 'active' : '' ?>">Пришло / ушло</a>

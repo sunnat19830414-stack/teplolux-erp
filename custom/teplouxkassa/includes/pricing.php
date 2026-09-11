@@ -16,10 +16,11 @@
  *    Если расходы по поставке внесли уже после проверки и товар ушёл ниже себестоимости, запись
  *    открывается снова (pricing_reopen_below_cost, вызывается из пересчёта себестоимости).
  *
- * 3. Оптовая (+5%) и розничная (+20%) — от дилерской (уровень 1 = llx_product.price), см.
- *    setup_price_levels.php 10.09.2026. Цену менять ТОЛЬКО через pricing_levels_payload():
- *    PUT products/{id} с 'multiprices' => [1 => дилерская, 2 => +5%, 3 => +20%] — Dolibarr сам пишет
- *    все три уровня в историю и карточку.
+ * 3. Оптовая и розничная — от дилерской (уровень 1 = llx_product.price), см. setup_price_levels.php
+ *    10.09.2026. Наценки задаёт руководство в BossTool «Наценки» (llx_const NT_PRICE_MARKUP_LEVEL2/3,
+ *    в процентах; по умолчанию 5 и 20). Цену менять ТОЛЬКО через pricing_levels_payload():
+ *    PUT products/{id} с 'multiprices' => [1 => дилерская, 2 => оптовая, 3 => розничная] — Dolibarr сам
+ *    пишет все три уровня в историю и карточку.
  *
  *    ⚠️ ОШИБКА DOLIBARR 24 (найдена 11.09.2026): при включённых уровнях PUT products/{id} с одним
  *    'price' пишет новую цену в историю, а в карточку (llx_product.price, её читает касса) — ПРЕДЫДУЩУЮ:
@@ -29,7 +30,7 @@
  *    pricing_sync_levels() — только для только что созданного товара (там REST уровни не заводит).
  */
 
-const PRICING_LEVEL_MARKUP = [2 => 0.05, 3 => 0.20];
+const PRICING_LEVEL_MARKUP_DEFAULT = [2 => 0.05, 3 => 0.20];   // если руководство ещё не меняло
 const PRICING_LOW_MARKUP = 0.10;   // порог «мало наценки», решение пользователя 11.09.2026
 
 function pricing_db(): mysqli
@@ -129,11 +130,68 @@ function pricing_blocked_message(array $blocked): string
          . 'продажа временно закрыта. Позвоните Умиду, чтобы он поставил цену.';
 }
 
+/** Наценки уровней 2 и 3 долями: [2 => 0.05, 3 => 0.20]. $reload — перечитать после изменения. */
+function pricing_markups(bool $reload = false): array
+{
+    static $m = null;
+    if ($m !== null && !$reload) return $m;
+    $m = PRICING_LEVEL_MARKUP_DEFAULT;
+    $r = pricing_db()->query("SELECT name, value FROM llx_const WHERE entity = 1 AND name IN ('NT_PRICE_MARKUP_LEVEL2', 'NT_PRICE_MARKUP_LEVEL3')");
+    while ($x = $r->fetch_assoc()) {
+        if ($x['value'] !== '' && is_numeric($x['value'])) $m[$x['name'] === 'NT_PRICE_MARKUP_LEVEL2' ? 2 : 3] = (float)$x['value'] / 100;
+    }
+    return $m;
+}
+
+/** Кто и когда последний раз менял наценки (note константы) — для показа на странице. */
+function pricing_markups_note(): string
+{
+    $x = pricing_db()->query("SELECT note FROM llx_const WHERE entity = 1 AND name = 'NT_PRICE_MARKUP_LEVEL2'")->fetch_assoc();
+    return (string)($x['note'] ?? '');
+}
+
+/** Записать наценки (в процентах). Оптовая не может быть больше розничной. */
+function pricing_set_markups(float $pct2, float $pct3, string $who): array
+{
+    if ($pct2 < 0 || $pct3 < 0 || $pct2 > 500 || $pct3 > 500) return ['ok' => false, 'error' => 'Наценка должна быть от 0 до 500%.'];
+    if ($pct2 > $pct3) return ['ok' => false, 'error' => 'Оптовая наценка не может быть больше розничной — оптовому клиенту дешевле.'];
+    $db = pricing_db();
+    $note = 'изменил ' . $who . ' ' . date('d.m.Y H:i');
+    foreach (['NT_PRICE_MARKUP_LEVEL2' => $pct2, 'NT_PRICE_MARKUP_LEVEL3' => $pct3] as $name => $v) {
+        $val = rtrim(rtrim(number_format($v, 2, '.', ''), '0'), '.');
+        $has = $db->query("SELECT rowid FROM llx_const WHERE entity = 1 AND name = '$name'")->fetch_assoc();
+        $st = $has
+            ? $db->prepare("UPDATE llx_const SET value = ?, note = ?, tms = NOW() WHERE entity = 1 AND name = '$name'")
+            : $db->prepare("INSERT INTO llx_const (value, note, name, entity, type, visible, tms) VALUES (?, ?, '$name', 1, 'chaine', 0, NOW())");
+        $st->bind_param('ss', $val, $note); $st->execute(); $st->close();
+    }
+    pricing_markups(true);
+    return ['ok' => true];
+}
+
+/** Пересчитать оптовую и розничную у всех товаров с дилерской ценой — после смены наценок. */
+function pricing_recalc_all_levels(int $userId): int
+{
+    $db = pricing_db();
+    $ids = array_column($db->query("SELECT rowid FROM llx_product WHERE price > 0")->fetch_all(MYSQLI_ASSOC), 'rowid');
+    $before = (int)$db->query("SELECT COUNT(*) n FROM llx_product_price")->fetch_assoc()['n'];
+    $db->begin_transaction();
+    try {
+        foreach ($ids as $id) pricing_sync_levels((int)$id, $userId);
+        $db->commit();
+    } catch (Throwable $e) {
+        $db->rollback();
+        throw $e;
+    }
+    $after = (int)$db->query("SELECT COUNT(*) n FROM llx_product_price")->fetch_assoc()['n'];
+    return $after - $before;   // сколько цен уровней записано
+}
+
 /** Тело PUT products/{id} для смены дилерской цены — сразу все три уровня (см. шапку, ошибка Dolibarr). */
 function pricing_levels_payload(float $dealer): array
 {
     $m = ['1' => $dealer];
-    foreach (PRICING_LEVEL_MARKUP as $lvl => $mk) $m[(string)$lvl] = round($dealer * (1 + $mk), 2);
+    foreach (pricing_markups() as $lvl => $mk) $m[(string)$lvl] = round($dealer * (1 + $mk), 2);
     return ['multiprices' => $m];
 }
 
@@ -151,7 +209,7 @@ function pricing_sync_levels(int $productId, int $userId): void
         (entity, tms, fk_product, date_price, price_level, price, price_ttc, price_min, price_min_ttc,
          price_base_type, tva_tx, recuperableonly, localtax1_tx, localtax2_tx, fk_user_author, tosell)
         VALUES (1, NOW(), ?, NOW(), ?, ?, ?, 0, 0, ?, ?, 0, 0, 0, ?, 1)");
-    foreach (PRICING_LEVEL_MARKUP as $lvl => $mk) {
+    foreach (pricing_markups() as $lvl => $mk) {
         $val = round($base * (1 + $mk), 2);
         $last = $db->query("SELECT price FROM llx_product_price WHERE fk_product = " . (int)$productId . " AND price_level = $lvl
                             ORDER BY date_price DESC, rowid DESC LIMIT 1")->fetch_assoc();

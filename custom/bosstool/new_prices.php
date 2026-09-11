@@ -5,7 +5,7 @@
  * После приёмки товара касса заносит принятые позиции в очередь (includes/pricing.php). Здесь
  * руководство видит по каждому приходу: сколько стоил товар раньше, сколько стоит новая партия с
  * логистикой, средняя себестоимость, текущие цены и наценку; ставит новую дилерскую цену (оптовая
- * +5% и розничная +20% пересчитываются сами) и отмечает приход проверенным.
+ * и розничная пересчитываются сами по наценкам со страницы «Наценки») и отмечает приход проверенным.
  *
  * Пока приход не проверен, касса продаёт по старой цене — кроме товаров, у которых цена стала не выше
  * себестоимости (вариант «б»): они подсвечены красным «касса не продаёт».
@@ -116,6 +116,8 @@ $groups = [];
 foreach ($rows as $x) $groups[(int)$x['fk_order']][] = $x;
 $levels = pricing_levels(array_map(fn($x) => (int)$x['fk_product'], $rows));
 $pct = fn(float $price, ?float $cost) => ($cost && $cost > 0) ? ($price / $cost - 1) * 100 : null;
+$mk = pricing_markups();
+$mkTxt = fn(float $v) => rtrim(rtrim(number_format($v * 100, 2, '.', ''), '0'), '.');
 
 require __DIR__ . '/includes/layout_top.php';
 ?>
@@ -131,7 +133,8 @@ require __DIR__ . '/includes/layout_top.php';
 <h1>Цены нового прихода</h1>
 <?php if ($message): ?><p class="<?= $messageType ?>"><?= htmlspecialchars($message) ?></p><?php endif; ?>
 <p class="muted">Здесь появляется товар, принятый на склад. Проверьте наценку, при необходимости поставьте
-  новую <strong>дилерскую</strong> цену — оптовая (+5%) и розничная (+20%) пересчитаются сами — и отметьте
+  новую <strong>дилерскую</strong> цену — оптовая (+<?= $mkTxt($mk[2]) ?>%) и розничная (+<?= $mkTxt($mk[3]) ?>%)
+  пересчитаются сами<?php if (user_direction() === null): ?> (<a href="price_settings.php">изменить наценки</a>)<?php endif; ?> — и отметьте
   приход проверенным. Пока приход не проверен, касса продаёт по старой цене, кроме
   <span style="background:#fee2e2; padding:0 4px">красных</span> строк: у них цена не выше себестоимости,
   касса их не продаёт. <span style="background:#fef3c7; padding:0 4px">Жёлтые</span> — наценка меньше
@@ -165,7 +168,7 @@ require __DIR__ . '/includes/layout_top.php';
       <thead><tr>
         <th>Артикул</th><th>Наименование</th><th class="np-num">Остаток</th>
         <th class="np-num">Себест.<br>была</th><th class="np-num">Себест.<br>новой партии</th><th class="np-num">Себест.<br>средняя</th>
-        <th class="np-num">Дилерская</th><th class="np-num">Оптовая<br>+5%</th><th class="np-num">Розничная<br>+20%</th>
+        <th class="np-num">Дилерская</th><th class="np-num">Оптовая<br>+<?= $mkTxt($mk[2]) ?>%</th><th class="np-num">Розничная<br>+<?= $mkTxt($mk[3]) ?>%</th>
         <th class="np-num">Наценка<br>к партии</th><th class="np-num">Наценка<br>к средней</th><th></th>
       </tr></thead>
       <tbody>
@@ -197,6 +200,7 @@ require __DIR__ . '/includes/layout_top.php';
 <script>
 (function () {
   const LOW = <?= json_encode(PRICING_LOW_MARKUP * 100) ?>;
+  const MK2 = <?= json_encode($mk[2]) ?>, MK3 = <?= json_encode($mk[3]) ?>;
   const f = v => v.toLocaleString('ru-RU', {minimumFractionDigits: 2, maximumFractionDigits: 2});
   function syncRow(tr) {
     const p = parseFloat(tr.querySelector('.np-price').value) || 0;
@@ -204,7 +208,7 @@ require __DIR__ . '/includes/layout_top.php';
     const orig = parseFloat(tr.dataset.price) || 0;
     const changed = Math.abs(p - orig) >= 0.005;
     // оптовая и розничная — как их пересчитает сервер
-    if (changed && p > 0) { tr.querySelector('.np-l2').textContent = f(Math.round(p * 105) / 100); tr.querySelector('.np-l3').textContent = f(Math.round(p * 120) / 100); }
+    if (changed && p > 0) { tr.querySelector('.np-l2').textContent = f(Math.round(p * (1 + MK2) * 100) / 100); tr.querySelector('.np-l3').textContent = f(Math.round(p * (1 + MK3) * 100) / 100); }
     const mk = c => c > 0 && p > 0 ? (p / c - 1) * 100 : null;
     const mb = mk(batch), mp = mk(pmp);
     tr.querySelector('.np-mb').textContent = mb === null ? '—' : mb.toFixed(1) + '%';

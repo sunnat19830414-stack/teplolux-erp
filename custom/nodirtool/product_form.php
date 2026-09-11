@@ -14,6 +14,7 @@
  */
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/product_lookup.php';
+require_once __DIR__ . '/includes/currency.php';
 
 const PRODUCT_FORM_CONTEXTS = [
     'orders' => ['page' => 'orders.php'],
@@ -30,16 +31,20 @@ $ctx = PRODUCT_FORM_CONTEXTS[$ctxKey] ?? PRODUCT_FORM_CONTEXTS['orders'];
 
 $message = '';
 $messageType = '';
-$fields = ['ref' => '', 'label' => '', 'direction' => 'zhomi', 'price' => ''];
+$fields = ['ref' => '', 'label' => '', 'direction' => 'zhomi', 'price' => '', 'buy_price' => ''];
+// Закупочная цена — в валюте выбранного в заказе поставщика: корзина ведётся в ней (B2)
+$buyCur = strtoupper((string)($_SESSION['po_supplier']['currency'] ?? '')) ?: 'USD';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $fields['ref'] = trim($_POST['ref'] ?? '');
     $fields['label'] = trim($_POST['label'] ?? '');
     $fields['direction'] = $_POST['direction'] ?? '';
     $fields['price'] = trim($_POST['price'] ?? '');
+    $fields['buy_price'] = trim($_POST['buy_price'] ?? '');
 
     $dir = PRODUCT_DIRECTIONS[$fields['direction']] ?? null;
     $price = $fields['price'] === '' ? 0.0 : (float)str_replace(',', '.', $fields['price']);
+    $buyPrice = $fields['buy_price'] === '' ? 0.0 : (float)str_replace([' ', ','], ['', '.'], $fields['buy_price']);
 
     if ($fields['ref'] === '' || $fields['label'] === '') {
         $message = 'Заполните артикул и название.';
@@ -74,13 +79,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     . 'и добавлен в заказ.', 'ok');
             }
 
-            // Сразу положить в корзину заказа — ради этого форма и открывалась.
+            // Сразу положить в корзину заказа — ради этого форма и открывалась. В корзину идёт
+            // ЗАКУПОЧНАЯ цена (11.09.2026): раньше туда уходила цена продажи из этой же формы, и заказ
+            // поставщику получал нашу розницу вместо цены поставщика.
             $_SESSION['po_new_product'] = [
                 'id' => $newId,
                 'ref' => $fields['ref'],
                 'label' => $fields['label'],
-                'price' => $price,
+                'price' => $buyPrice,
             ];
+            // Выбранный в заказе поставщик не должен сбрасываться при возврате (так и было задумано
+            // в шапке файла, но флаг не ставился — после «+ Новый товар» поставщика выбирали заново).
+            $_SESSION['_preserve_once']['po_supplier'] = true;
             header('Location: ' . $ctx['page']);
             exit;
         }
@@ -117,8 +127,14 @@ require __DIR__ . '/includes/layout_top.php';
     <p class="muted" style="margin:-4px 0 12px">Определяет, на чьей кассе появится товар и на какой
     склад он придёт по умолчанию. Код (J/T) система выдаст сама.</p>
 
-    <label>Цена продажи, $ <span class="muted">(необязательно, можно проставить позже)</span></label>
+    <label>Цена поставщика (закупочная), <?= htmlspecialchars(currency_label($buyCur)) ?></label>
+    <input type="text" name="buy_price" value="<?= htmlspecialchars($fields['buy_price']) ?>" placeholder="как в прайсе поставщика">
+    <p class="muted" style="margin:-4px 0 12px">Пойдёт в заказ поставщику. Можно оставить пустым и вписать в корзине —
+    но утвердить заказ без цены программа не даст.</p>
+
+    <label>Цена продажи (дилерская), $ <span class="muted">(необязательно, можно проставить позже)</span></label>
     <input type="text" name="price" value="<?= htmlspecialchars($fields['price']) ?>" placeholder="0">
+    <p class="muted" style="margin:-4px 0 12px">Оптовая и розничная посчитаются сами по наценкам, которые задаёт руководство.</p>
 
     <div class="row">
       <div style="flex:0"><button type="submit">Создать и добавить в заказ</button></div>
