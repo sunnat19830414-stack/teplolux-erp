@@ -91,6 +91,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ". Расхождение с заказом — сообщите " . $cfg['purchaser_label'] . ", чтобы поправили заказ, потом принимайте заново.";
                     continue;
                 }
+                // Цена-заглушка 0,01: приёмка по ней затёрла бы себестоимость товара (11.09.2026).
+                // Защита стоит и в NodirTool при утверждении — здесь страховка для заказов, утверждённых
+                // раньше неё. Строку не принимаем, остальные позиции идут как обычно.
+                if (($priceByLine[$lineIdInt] ?? 0) <= 0.011) {
+                    $rejected[] = ($labelByLine[$lineIdInt] ?: $fkProduct) . ': в заказе нет цены (0,01 — заглушка). Попросите ' .
+                        $cfg['purchaser_label'] . ' вписать цену из спецификации — иначе себестоимость товара обнулится. Позиция не принята.';
+                    continue;
+                }
                 $warehouseId = (int)($warehouses[$i] ?? $cfg['default_warehouse_id']);
                 if (!in_array($warehouseId, $cfg['warehouse_ids'], false)) {
                     $rejected[] = "{$fkProduct}: указан склад, не относящийся к направлению — строка отклонена.";
@@ -363,6 +371,9 @@ require __DIR__ . '/includes/layout_top.php';
             <td>
               <?= htmlspecialchars($line['product_label'] ?? $line['label'] ?? '') ?>
               <div class="muted"><?= htmlspecialchars($line['product_ref'] ?? '') ?></div>
+              <?php if ((float)($line['subprice'] ?? 0) <= 0.011): ?>
+                <div style="color:#dc2626;font-size:12px">⚠ в заказе нет цены — позицию не принять, сообщите <?= htmlspecialchars($cfg['purchaser_label']) ?></div>
+              <?php endif; ?>
             </td>
             <td><?= number_format((float)$line['qty'], 2) ?></td>
             <td><?= number_format($line['already_received'], 2) ?></td>

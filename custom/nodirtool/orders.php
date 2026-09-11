@@ -142,6 +142,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $who = $_SESSION['user']['name'] ?? '';
         $result = null;
         $label = '';
+        // Цена-заглушка (0,01) не должна уйти дальше черновика (11.09.2026). В справочнике 784 товара
+        // с закупочной ценой 0,01 USD, и при оформлении заказа она подставляется сама. Если такой
+        // заказ примут на склад, Dolibarr пересчитает себестоимость по 0,01 — затрёт настоящую,
+        // а весь фрахт (он делится пропорционально стоимости строк) ляжет на остальные позиции.
+        // Проводить черновик можно — утвердить и отправить нельзя, пока цены не исправлены.
+        if (in_array($action, ['approve_order', 'send_order'], true)) {
+            $chk = $api->getSupplierOrder($orderId);
+            $stub = [];
+            foreach ((array)($chk['lines'] ?? []) as $ln) {
+                if ((float)($ln['subprice'] ?? 0) <= 0.011) $stub[] = ($ln['ref'] ?? $ln['product_ref'] ?? '') . ' ' . mb_substr((string)($ln['product_label'] ?? $ln['label'] ?? ''), 0, 40);
+            }
+            if ($stub) {
+                flash_set('Заказ #' . $orderId . ' не ' . ($action === 'approve_order' ? 'утверждён' : 'отправлен') .
+                    ': у ' . count($stub) . ' позиц. цена не указана (0,01 — заглушка). Откройте заказ, «Изменить заказ» и впишите цену из спецификации поставщика: ' .
+                    implode('; ', array_slice($stub, 0, 6)) . (count($stub) > 6 ? ' …' : ''), 'err');
+                header('Location: orders.php');
+                exit;
+            }
+        }
         if ($action === 'validate_order') { $result = $api->validateSupplierOrder($orderId); $label = 'проведён'; }
         elseif ($action === 'approve_order') { $result = $api->approveSupplierOrder($orderId); $label = 'утверждён'; }
         elseif ($action === 'send_order') { $result = $api->sendSupplierOrder($orderId); $label = 'отправлен поставщику'; }
