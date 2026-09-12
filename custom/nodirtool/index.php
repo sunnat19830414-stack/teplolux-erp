@@ -5,6 +5,7 @@
  * прямыми ссылками на КОНКРЕТНЫЕ заказы/поставщиков/перевозчиков (не просто число). См. CLAUDE.md.
  */
 require_once __DIR__ . '/includes/auth.php';
+require_once __DIR__ . '/includes/currency.php';
 require_once __DIR__ . '/includes/debt.php';   // долги по валютам (05.09.2026)
 require_once __DIR__ . '/includes/payment_terms.php'; // срок оплаты счетов (B7, 05.09.2026)
 require_once __DIR__ . '/includes/claims.php';        // открытые рекламации (B8, 05.09.2026)
@@ -152,6 +153,12 @@ if (is_array($suppliers)) {
         $amount = (float)($opts['options_contract_amount'] ?? 0);
         $startTs = !empty($opts['options_contract_start']) ? (int)$opts['options_contract_start'] : null;
         if ($amount <= 0 || !$startTs) continue;
+        // Считаем ровно как в карточке поставщика (11.09.2026): в валюте контракта, плюс «уже выполнено
+        // до учёта в программе», и без заказов, которые в эту сумму уже входят (до её даты).
+        $contractCur = strtoupper((string)($s['multicurrency_code'] ?? '')) ?: 'USD';
+        $contractRate = $contractCur === 'USD' ? 1.0 : (float)(dolibarr_currency_rate($contractCur) ?? 0);
+        $doneAmount = (float)($opts['options_contract_done_amount'] ?? 0);
+        $doneTs = !empty($opts['options_contract_done_date']) ? (int)$opts['options_contract_done_date'] : null;
 
         $orders = $api->getSupplierOrdersForSupplier((int)$s['id']);
         $spent = 0;
@@ -159,13 +166,17 @@ if (is_array($suppliers)) {
         if (is_array($orders)) {
             foreach ($orders as $o) {
                 $statut = (int)($o['statut'] ?? 0);
-                $date = (int)($o['date_commande'] ?? 0);
-                if ($statut >= 2 && $statut <= 5 && $date >= $startTs) {
-                    $spent += (float)($o['total_ttc'] ?? 0);
-                    $currencies[$o['multicurrency_code'] ?: 'USD'] = true;
-                }
+                $date = (int)($o['date_commande'] ?: ($o['date_approve'] ?: ($o['date_valid'] ?: ($o['date_creation'] ?? 0))));
+                if ($statut < 2 || $statut > 5 || $date < $startTs) continue;
+                if ($doneTs && date('Y-m-d', $date) <= date('Y-m-d', $doneTs)) continue;
+                $cur = strtoupper((string)($o['multicurrency_code'] ?: 'USD'));
+                $spent += $cur === $contractCur
+                    ? (float)($cur === 'USD' ? $o['total_ttc'] : ($o['multicurrency_total_ttc'] ?? $o['total_ttc']))
+                    : ($contractRate > 0 ? (float)($o['total_ttc'] ?? 0) * $contractRate : 0.0);
+                $currencies[$cur] = true;
             }
         }
+        $spent += $doneAmount;
         $ratio = $amount > 0 ? $spent / $amount : 0;
         if ($ratio >= 0.8) {
             $contractWarnings[] = ['name' => $s['name'] ?? $s['nom'] ?? '', 'spent' => $spent, 'amount' => $amount, 'ratio' => $ratio, 'mixed_currency' => count($currencies) > 1];
