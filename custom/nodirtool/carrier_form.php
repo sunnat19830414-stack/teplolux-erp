@@ -20,6 +20,9 @@ const CARRIER_FORM_CONTEXTS = [
     // order_view.php адресуется по id заказа в URL (не в сессии, как batch) — need_id=true просит
     // дописать ?id=<return_id> к странице возврата, return_id передаётся скрытым полем формы.
     'order_expense' => ['page' => 'order_view.php', 'field' => 'new_carrier_for_expense', 'need_id' => true],
+    // Новый рейс (B6, 05.09.2026): форма рейса на shipments.php — тот же одноразовый маркер,
+    // что и у расхода, чтобы только что созданный перевозчик сам подставился в пикер.
+    'shipments' => ['page' => 'shipments.php', 'field' => 'new_carrier_for_shipment'],
 ];
 
 $ctxKey = $_GET['ctx'] ?? ($_POST['ctx'] ?? '');
@@ -43,13 +46,40 @@ if ($isEdit && $_SERVER['REQUEST_METHOD'] !== 'POST') {
     $fields['phone'] = $existing['phone'] ?? '';
     $fields['town'] = $existing['town'] ?? '';
     $fields['address'] = $existing['address'] ?? '';
+    // Реквизиты договора перевозки (B6, 05.09.2026): у перевозчиков они такие же, как у поставщиков —
+    // номер, сумма лимита и с какой даты считать (у TRUKKER это контракт TL-23 на 500 000 $).
+    $cOpts = $existing['array_options'] ?? [];
+    $contractNumber   = (string)($cOpts['options_contract_number'] ?? '');
+    // В базе сумма лежит как 20000.00000000 — в поле ввода это выглядело как «20000,00000000».
+    // Показываем нормальное число (замечание Абдурашида 05.09.2026).
+    $rawAmount = $cOpts['options_contract_amount'] ?? '';
+    $contractAmount = ($rawAmount === '' || $rawAmount === null)
+        ? '' : rtrim(rtrim(number_format((float)$rawAmount, 2, '.', ''), '0'), '.');
+    $contractCurrency = strtoupper((string)($cOpts['options_contract_currency'] ?? '')) ?: 'USD';
+    $contractStart    = !empty($cOpts['options_contract_start']) ? date('Y-m-d', (int)$cOpts['options_contract_start']) : '';
 }
+$contractNumber   = $contractNumber   ?? '';
+$contractAmount   = $contractAmount   ?? '';
+$contractCurrency = $contractCurrency ?? 'USD';
+$contractStart    = $contractStart    ?? '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $fields['name'] = trim($_POST['name'] ?? '');
     $fields['phone'] = trim($_POST['phone'] ?? '');
     $fields['town'] = trim($_POST['town'] ?? '');
     $fields['address'] = trim($_POST['address'] ?? '');
+
+    $contractNumber   = trim($_POST['contract_number'] ?? '');
+    $contractAmount   = trim($_POST['contract_amount'] ?? '');
+    $contractCurrency = strtoupper(trim($_POST['contract_currency'] ?? 'USD')) ?: 'USD';
+    $contractStart    = trim($_POST['contract_start'] ?? '');
+    $fields['array_options'] = [
+        'options_is_carrier'        => 1,
+        'options_contract_number'   => $contractNumber,
+        'options_contract_amount'   => $contractAmount !== '' ? (float)$contractAmount : '',
+        'options_contract_currency' => $contractCurrency,
+        'options_contract_start'    => $contractStart,
+    ];
 
     if ($fields['name'] === '') {
         $message = 'Укажите название перевозчика.';
@@ -114,6 +144,24 @@ require __DIR__ . '/includes/layout_top.php';
     <input type="text" name="town" value="<?= htmlspecialchars($fields['town']) ?>">
     <label>Адрес</label>
     <input type="text" name="address" value="<?= htmlspecialchars($fields['address']) ?>">
+
+    <h2 style="margin-top:18px">Договор перевозки</h2>
+    <p class="muted">Заполняется, если с перевозчиком заключён договор на сумму — тогда видно,
+    сколько по нему уже выбрано.</p>
+    <label>Номер договора</label>
+    <input type="text" name="contract_number" value="<?= htmlspecialchars($contractNumber) ?>" placeholder="например TL-23">
+    <div class="row">
+      <div style="flex:1"><label>Сумма договора</label>
+        <input type="number" step="0.01" min="0" name="contract_amount" value="<?= htmlspecialchars($contractAmount) ?>"></div>
+      <div style="flex:0 0 130px"><label>Валюта</label>
+        <select name="contract_currency">
+          <?php foreach (['USD' => 'USD — $', 'EUR' => 'EUR — €', 'RUB' => 'RUB — ₽', 'UZS' => 'UZS — сум'] as $k => $lbl): ?>
+            <option value="<?= $k ?>" <?= $contractCurrency === $k ? 'selected' : '' ?>><?= htmlspecialchars($lbl) ?></option>
+          <?php endforeach; ?>
+        </select></div>
+      <div style="flex:0 0 180px"><label>Действует с</label>
+        <input type="date" name="contract_start" value="<?= htmlspecialchars($contractStart) ?>"></div>
+    </div>
     <div class="row">
       <div style="flex:0"><button type="submit"><?= $isEdit ? 'Сохранить' : 'Создать' ?></button></div>
       <?php $cancelHref = ($ctx['page'] ?? 'carriers.php') . ((!empty($ctx['need_id']) && $returnId) ? '?id=' . $returnId : ''); ?>

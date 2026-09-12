@@ -80,11 +80,37 @@ function logistics_ensure_tables(): void
         fk_user INT DEFAULT NULL,
         comment VARCHAR(255) DEFAULT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    // Оплата может относиться к конкретному рейсу (B6, 05.09.2026) — как в акте сверки, где у
+    // каждой оплаты стоит номер инвойса перевозчика. NULL = оплата «в общий долг», как было раньше.
+    $db->query("ALTER TABLE llx_carrier_payment ADD COLUMN IF NOT EXISTS fk_shipment INT NULL DEFAULT NULL");
     // Отчёт "Себестоимость по товарам" (02.09.2026, п. 4.3.4) — последний посчитанный результат
     // logistics_recompute_cost() по каждой паре (поставка, товар), одна строка ЗАМЕНЯЕТСЯ при
     // каждом пересчёте (не история — history не просили, только актуальное состояние). Источник
     // истины для отчёта, отдельно от live `llx_product.pmp` (тот — единое число по товару сразу
     // по ВСЕМ поставкам вместе, здесь — разбивка по конкретной поставке).
+    // Ж7 (05.09.2026): виды расходов — справочником, а не константой в коде.
+    $db->query("CREATE TABLE IF NOT EXISTS llx_nt_logistics_expense_type (
+        rowid INT AUTO_INCREMENT PRIMARY KEY,
+        code VARCHAR(40) NOT NULL,
+        name VARCHAR(120) NOT NULL,
+        active TINYINT NOT NULL DEFAULT 1,
+        sort_order INT NOT NULL DEFAULT 100,
+        datec DATETIME NOT NULL,
+        UNIQUE KEY uniq_code (code),
+        UNIQUE KEY uniq_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    // Перенос заготовки — один раз, при пустой таблице. Коды те же, что были в константе, поэтому
+    // уже внесённые расходы продолжают читаться.
+    $seedCheck = $db->query("SELECT COUNT(*) n FROM llx_nt_logistics_expense_type");
+    if ($seedCheck && (int)$seedCheck->fetch_assoc()['n'] === 0) {
+        $i = 0;
+        foreach (LOGISTICS_EXPENSE_TYPES_SEED as $code => $name) {
+            $i += 10;
+            $db->query("INSERT IGNORE INTO llx_nt_logistics_expense_type (code, name, active, sort_order, datec)
+                VALUES ('" . $db->real_escape_string($code) . "', '" . $db->real_escape_string($name) . "', 1, $i, NOW())");
+        }
+    }
+
     $db->query("CREATE TABLE IF NOT EXISTS llx_supplier_landed_result (
         scope_type VARCHAR(10) NOT NULL,
         scope_id INT NOT NULL,
@@ -98,7 +124,12 @@ function logistics_ensure_tables(): void
     $done = true;
 }
 
-const LOGISTICS_EXPENSE_TYPES = [
+/**
+ * Виды логистических расходов, с которыми проект начинался. Используются как ЗАГОТОВКА: при первом
+ * обращении переносятся в таблицу `llx_nt_logistics_expense_type`, дальше всё берётся оттуда.
+ * Прямо обращаться к этой константе не нужно — есть logistics_expense_types().
+ */
+const LOGISTICS_EXPENSE_TYPES_SEED = [
     'freight'         => 'Фрахт',
     'customs'         => 'Таможня',
     'certificate'     => 'Сертификат',
@@ -107,6 +138,85 @@ const LOGISTICS_EXPENSE_TYPES = [
     'customs_storage' => 'Таможенный склад (хранения)',
     'declarant'       => 'Расходы декларанта',
 ];
+
+/**
+ * Виды расходов справочником (Ж7 отчёта «Пробелы NodirTool», 05.09.2026).
+ *
+ * Раньше семь видов были зашиты в код, и всё нетипичное валили в «Прочее» — разобраться потом
+ * было невозможно. Категории хозрасходов Абдурашид заводит сам, а здесь такой возможности не было.
+ *
+ * Коды уже внесённых расходов не меняются: заготовка переносится в таблицу с теми же кодами,
+ * поэтому старые строки продолжают читаться. Скрытый вид остаётся видимым в старых записях —
+ * скрытие убирает его только из выпадающего списка при вводе нового расхода.
+ */
+function logistics_expense_types(bool $onlyActive = true): array
+{
+    logistics_ensure_tables();
+    $db = logistics_db();
+    $sql = "SELECT code, name FROM llx_nt_logistics_expense_type";
+    if ($onlyActive) $sql .= " WHERE active = 1";
+    $sql .= " ORDER BY sort_order, name";
+    $res = $db->query($sql);
+    $out = [];
+    if ($res) while ($r = $res->fetch_assoc()) $out[$r['code']] = $r['name'];
+    return $out;
+}
+
+/** Название вида расхода по коду — в том числе скрытого (для старых записей). */
+function logistics_expense_type_label(string $code): string
+{
+    static $all = null;
+    if ($all === null) $all = logistics_expense_types(false);
+    return $all[$code] ?? (LOGISTICS_EXPENSE_TYPES_SEED[$code] ?? $code);
+}
+
+/** Добавить свой вид расхода. Код генерируется сам — латиницей, чтобы был устойчив. */
+function logistics_add_expense_type(string $name): array
+{
+    logistics_ensure_tables();
+    $name = trim($name);
+    if ($name === '') return ['ok' => false, 'error' => 'Укажите название вида расхода.'];
+    $db = logistics_db();
+
+    $exists = $db->query("SELECT rowid FROM llx_nt_logistics_expense_type
+                           WHERE name = '" . $db->real_escape_string($name) . "'");
+    if ($exists && $exists->num_rows) return ['ok' => false, 'error' => 'Такой вид расхода уже есть.'];
+
+    $code = 'custom_' . time() . '_' . random_int(100, 999);
+    $ok = $db->query("INSERT INTO llx_nt_logistics_expense_type (code, name, active, sort_order, datec)
+        VALUES ('" . $db->real_escape_string($code) . "', '" . $db->real_escape_string($name) . "', 1, 100, NOW())");
+    return $ok ? ['ok' => true, 'code' => $code] : ['ok' => false, 'error' => $db->error];
+}
+
+/** Показать/скрыть вид расхода. Уже внесённые расходы этого вида не трогаются. */
+function logistics_set_expense_type_active(string $code, bool $active): bool
+{
+    logistics_ensure_tables();
+    $db = logistics_db();
+    $stmt = $db->prepare("UPDATE llx_nt_logistics_expense_type SET active = ? WHERE code = ?");
+    $a = $active ? 1 : 0;
+    $stmt->bind_param('is', $a, $code);
+    $r = $stmt->execute();
+    $stmt->close();
+    return (bool)$r;
+}
+
+/** Переименовать вид расхода (код не меняется — старые записи продолжают читаться). */
+function logistics_rename_expense_type(string $code, string $name): array
+{
+    logistics_ensure_tables();
+    $name = trim($name);
+    if ($name === '') return ['ok' => false, 'error' => 'Название не может быть пустым.'];
+    $db = logistics_db();
+    $stmt = $db->prepare("UPDATE llx_nt_logistics_expense_type SET name = ? WHERE code = ?");
+    $stmt->bind_param('ss', $name, $code);
+    try { $stmt->execute(); } catch (mysqli_sql_exception $e) {
+        $stmt->close();
+        return ['ok' => false, 'error' => 'Вид расхода с таким названием уже есть.'];
+    }
+    $stmt->close();
+    return ['ok' => true];
+}
 
 /** Создать партию (необязательная группа заказов, которые ехали одной машиной). */
 function logistics_create_batch(string $label): int
@@ -192,7 +302,7 @@ function logistics_close_batch(int $batchId, bool $close = true): bool
  *
  * $carrierId (топ-5 пункт 3, 02.09.2026) — если указан, деньги СЕЙЧАС НЕ СПИСЫВАЮТСЯ: расход всё
  * равно немедленно влияет на себестоимость (как и раньше), но это становится долгом перед перевозчиком,
- * гасится отдельно через logistics_record_carrier_payment() (раздел "Перевозчики"). Без $carrierId
+ * гасится отдельно через carrier_pay() (раздел "Перевозчики" или «Оплатить рейс»). Без $carrierId
  * поведение ПОЛНОСТЬЮ прежнее — реальная проводка списания в момент ввода (сохранено ради обратной
  * совместимости с уже работающими типами расходов вроде "Таможня"/"Комиссия банка", которые обычно
  * платятся сразу, а не перевозчику).
@@ -214,7 +324,7 @@ function logistics_record_expense(
     logistics_ensure_tables();
     $db = logistics_db();
 
-    if (!isset(LOGISTICS_EXPENSE_TYPES[$expenseType])) {
+    if (!isset(logistics_expense_types(false)[$expenseType])) {
         return ['ok' => false, 'error' => 'Неизвестный вид расхода.'];
     }
     if ($nativeAmount <= 0) {
@@ -228,7 +338,7 @@ function logistics_record_expense(
     }
     $usdAmount = $nativeCurrency === 'USD' ? round($nativeAmount, 2) : round($nativeAmount / $rate, 2);
 
-    $typeLabel = LOGISTICS_EXPENSE_TYPES[$expenseType];
+    $typeLabel = logistics_expense_type_label($expenseType);
     $scopeLabel = $scopeType === 'batch' ? "партия #$scopeId" : "заказ #$scopeId";
     $label = "Логистика ($scopeLabel) — $typeLabel ($who)";
 
@@ -267,11 +377,13 @@ function logistics_record_expense(
         $db->rollback();
         return ['ok' => false, 'error' => 'Ошибка сохранения расхода: ' . $db->error];
     }
+    $expenseId = (int)$db->insert_id;
 
     $db->commit();
 
     $result = logistics_recompute_cost($scopeType, $scopeId);
     $result['ok'] = true;
+    $result['expense_id'] = $expenseId;   // нужен рейсам: правка ставки заменяет именно эту строку
     $result['usd_amount'] = $usdAmount;
     $result['overdraft_warning'] = $overdraftWarning;
     $result['note'] = $carrierId !== null
@@ -280,69 +392,11 @@ function logistics_record_expense(
     return $result;
 }
 
-/**
- * Оплата перевозчику (топ-5 пункт 3) — реальное списание со счёта, отдельно от начисления расхода
- * (см. logistics_record_expense() выше). Может быть частичной/произвольной суммой, не привязана к
- * конкретному расходу — гасит общий долг (см. logistics_get_carrier_debt()), тем же принципом, что и
- * оплата счетов поставщику (создали долг → потом оплатили, возможно по частям).
+/*
+ * Оплата перевозчику — carrier_pay() / shipment_pay() в includes/shipments.php (11.09.2026).
+ * Прежняя logistics_record_carrier_payment() удалена: она записывала оплату в валюте СЧЁТА, и рейс
+ * в 3 500 EUR, оплаченный долларами, показывался как «долг 3 500 EUR и переплата 4 070 USD».
  */
-function logistics_record_carrier_payment(
-    int $carrierId,
-    float $nativeAmount,
-    string $nativeCurrency,
-    ?float $rate,
-    int $accountId,
-    string $who,
-    string $comment = ''
-): array {
-    logistics_ensure_tables();
-    $db = logistics_db();
-
-    if ($nativeAmount <= 0) {
-        return ['ok' => false, 'error' => 'Сумма должна быть больше нуля.'];
-    }
-    // В отличие от logistics_record_expense() (только USD/UZS), сюда можно платить с любого из счетов
-    // проекта, включая EUR-MAIN — курс нужен для любой валюты, кроме USD, чтобы верно уменьшить долг,
-    // который всегда считается в USD.
-    if ($nativeCurrency !== 'USD' && (!$rate || $rate <= 0)) {
-        return ['ok' => false, 'error' => 'Укажите курс для пересчёта в доллары.'];
-    }
-    $usdAmount = $nativeCurrency === 'USD' ? round($nativeAmount, 2) : round($nativeAmount / $rate, 2);
-    $label = "Оплата перевозчику #$carrierId ($who)";
-    $now = date('Y-m-d H:i:s');
-
-    $overdraftWarning = '';
-    $resBal = $db->query("SELECT COALESCE(SUM(amount),0) as bal FROM llx_bank WHERE fk_account=" . (int)$accountId);
-    $balanceBefore = $resBal ? (float)$resBal->fetch_assoc()['bal'] : null;
-    if ($balanceBefore !== null && $nativeAmount > $balanceBefore + 0.01) {
-        $overdraftWarning = 'ВНИМАНИЕ: на счету было ' . number_format($balanceBefore, 2) . ' — после этой оплаты счёт уйдёт в минус. ';
-    }
-
-    $db->begin_transaction();
-
-    $r1 = $db->query("INSERT INTO llx_bank (datec, dateo, datev, amount, label, fk_account, fk_type, fk_user_author, rappro)
-        VALUES ('$now', '" . date('Y-m-d') . "', '" . date('Y-m-d') . "', -" . (float)$nativeAmount . ",
-        '" . $db->real_escape_string($label) . "', " . (int)$accountId . ", 'VIR', " . LOGISTICS_API_USER_ID . ", 0)");
-    if (!$r1) {
-        $db->rollback();
-        return ['ok' => false, 'error' => 'Ошибка проводки: ' . $db->error];
-    }
-    $bankId = (int)$db->insert_id;
-
-    $r2 = $db->query("INSERT INTO llx_carrier_payment
-        (fk_carrier, native_amount, native_currency, rate, usd_amount, fk_bank, datec, fk_user, comment)
-        VALUES (" . (int)$carrierId . ", " . (float)$nativeAmount . ", '" . $db->real_escape_string($nativeCurrency) . "',
-        " . ($rate !== null ? (float)$rate : 'NULL') . ", $usdAmount, $bankId, '$now', " . LOGISTICS_API_USER_ID . ",
-        '" . $db->real_escape_string($comment) . "')");
-    if (!$r2) {
-        $db->rollback();
-        return ['ok' => false, 'error' => 'Ошибка сохранения оплаты: ' . $db->error];
-    }
-
-    $db->commit();
-
-    return ['ok' => true, 'usd_amount' => $usdAmount, 'overdraft_warning' => $overdraftWarning];
-}
 
 /** Расходы, начисленные конкретному перевозчику (fk_carrier), по всем заказам/партиям сразу. */
 function logistics_get_carrier_expenses(int $carrierId): array
@@ -366,40 +420,35 @@ function logistics_get_carrier_payments(int $carrierId): array
     return $out;
 }
 
-/** Долг конкретному перевозчику (начислено минус оплачено), в USD. Может быть отрицательным (переплата). */
-function logistics_get_carrier_debt(int $carrierId): float
-{
-    logistics_ensure_tables();
-    $db = logistics_db();
-    $charged = $db->query("SELECT COALESCE(SUM(usd_amount),0) s FROM llx_supplier_logistics_expense WHERE fk_carrier=" . (int)$carrierId)->fetch_assoc()['s'];
-    $paid = $db->query("SELECT COALESCE(SUM(usd_amount),0) s FROM llx_carrier_payment WHERE fk_carrier=" . (int)$carrierId)->fetch_assoc()['s'];
-    return round((float)$charged - (float)$paid, 2);
-}
-
 /**
- * Долги ВСЕХ перевозчиков сразу (для дашборда "кому должны") — одним проходом по каждой таблице
- * (GROUP BY), не в цикле по каждому перевозчику отдельно (тот же принцип, что и везде в проекте после
- * отчёта аудита P0#5 — см. CLAUDE.md). Возвращает [fk_carrier => ['charged'=>, 'paid'=>, 'debt'=>]],
- * только те, у кого есть хоть один расход (перевозчики без единого расхода сюда не попадают).
+ * Начислено и оплачено перевозчику ПО ВАЛЮТАМ (05.09.2026, требование пользователя: «долг
+ * показываешь на своих валютах — то есть то, что мы должны оплатить»).
+ *
+ *
+ * Возвращает ['charged' => ['EUR'=>..], 'paid' => [...], 'debt' => [...]] — только ненулевые.
  */
-function logistics_get_all_carrier_debts(): array
+function logistics_get_carrier_totals_by_currency(int $carrierId): array
 {
     logistics_ensure_tables();
     $db = logistics_db();
-    $out = [];
-    $res = $db->query("SELECT fk_carrier, COALESCE(SUM(usd_amount),0) s FROM llx_supplier_logistics_expense WHERE fk_carrier IS NOT NULL GROUP BY fk_carrier");
-    while ($row = $res->fetch_assoc()) {
-        $out[(int)$row['fk_carrier']] = ['charged' => (float)$row['s'], 'paid' => 0.0, 'debt' => (float)$row['s']];
+    $out = ['charged' => [], 'paid' => [], 'debt' => []];
+
+    foreach ([['llx_supplier_logistics_expense', 'charged'], ['llx_carrier_payment', 'paid']] as [$table, $key]) {
+        $res = $db->query("SELECT UPPER(COALESCE(NULLIF(native_currency,''),'USD')) cur, COALESCE(SUM(native_amount),0) s
+                             FROM $table WHERE fk_carrier=" . (int)$carrierId . " GROUP BY cur");
+        while ($row = $res->fetch_assoc()) {
+            $out[$key][$row['cur']] = round((float)$row['s'], 2);
+        }
     }
-    $res2 = $db->query("SELECT fk_carrier, COALESCE(SUM(usd_amount),0) s FROM llx_carrier_payment GROUP BY fk_carrier");
-    while ($row = $res2->fetch_assoc()) {
-        $cid = (int)$row['fk_carrier'];
-        if (!isset($out[$cid])) $out[$cid] = ['charged' => 0.0, 'paid' => 0.0, 'debt' => 0.0];
-        $out[$cid]['paid'] = (float)$row['s'];
-        $out[$cid]['debt'] = round($out[$cid]['charged'] - $out[$cid]['paid'], 2);
-    }
+    // M3 (финансовый аудит 05.09.2026): долг НЕ считается здесь второй раз своей формулой —
+    // берётся из carrier_debt_by_currency() (includes/debt.php), единственного места, где он
+    // вычисляется. Раньше формул было несколько, и они разошлись бы при первой же правке одной
+    // из них. Здесь остаётся только разбивка «начислено/оплачено», которой в debt.php нет.
+    require_once __DIR__ . '/debt.php';
+    $out['debt'] = carrier_debt_by_currency($carrierId)[$carrierId] ?? [];
     return $out;
 }
+
 
 /** Список внесённых расходов по scope (для отображения). */
 function logistics_get_expenses(string $scopeType, int $scopeId): array
@@ -585,6 +634,14 @@ function logistics_recompute_cost(string $scopeType, int $scopeId): array
             $qty, " . round($rawPricePerUnit, 4) . ", $landedCostPerUnit, '" . date('Y-m-d H:i:s') . "')");
     }
 
+    // Цены нового прихода (11.09.2026): если расходы внесли после проверки цен и товар ушёл ниже
+    // себестоимости — позиция снова в очереди у руководства, касса её не продаёт (includes/pricing.php).
+    // function_exists: этот файл подключает и касса, у которой своя копия pricing.php.
+    if ($affected) {
+        if (!function_exists('pricing_reopen_below_cost')) require_once __DIR__ . '/pricing.php';
+        pricing_reopen_below_cost(array_column($affected, 'fk_product'), $orderIds);
+    }
+
     return ['affected_products' => $affected];
 }
 
@@ -605,6 +662,9 @@ function logistics_delete_expense(int $expenseId): array
         return ['ok' => false, 'error' => 'Расход не найден.'];
     }
     $expense = $res->fetch_assoc();
+    if ($expense['expense_type'] === 'fx_diff') {
+        return ['ok' => false, 'error' => 'Курсовая разница считается сама по оплатам рейса — удалять её не нужно.'];
+    }
 
     $reversalNote = '';
     if (!empty($expense['fk_bank'])) {
@@ -765,4 +825,26 @@ function logistics_get_landed_report(): array
     unset($row);
 
     return $rows;
+}
+
+/**
+ * Есть ли по этой поставке хоть один логистический расход (H4, 05.09.2026).
+ *
+ * Нужно приёмке в кассе: пересчитывать себестоимость после приёмки имеет смысл ТОЛЬКО когда
+ * логистика реально внесена. Если расходов нет — трогать `pmp` нельзя: пересчёт считает по
+ * ЗАКАЗАННОМУ количеству, а Dolibarr при частичной приёмке уже записал честную цифру по принятому.
+ *
+ * Учитываются и расходы уровня заказа, и расходы партии, в которую заказ входит.
+ */
+function logistics_has_expenses_for_order(int $orderId): bool
+{
+    logistics_ensure_tables();
+    $db = logistics_db();
+    $res = $db->query("
+        SELECT 1 FROM llx_supplier_logistics_expense
+         WHERE (scope_type='order' AND scope_id=" . (int)$orderId . ")
+            OR (scope_type='batch' AND scope_id IN (
+                    SELECT fk_batch FROM llx_supplier_shipment_batch_order WHERE fk_order=" . (int)$orderId . "))
+         LIMIT 1");
+    return (bool)($res && $res->num_rows > 0);
 }

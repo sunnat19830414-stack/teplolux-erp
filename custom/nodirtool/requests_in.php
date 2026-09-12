@@ -118,17 +118,20 @@ $recent = request_list([], ['ordered', 'declined'], 25);
 $showHistory = !empty($_GET['history']);
 
 $directionNames = ['J' => 'Жоми', 'T' => 'Турк'];
+// кто составил: закупщики — из своего конфига, руководство — по логинам BossTool
+$authorName = fn($login) => $cfg['users'][$login]['display_name'] ?? (['umid' => 'Умид (шеф)', 'sunnatilla' => 'Суннатилла'][$login] ?? $login);
 
 require __DIR__ . '/includes/layout_top.php';
 ?>
 
-<h1>Заявки от руководства</h1>
+<h1>Заявки к оформлению</h1>
+<p class="muted">Списки закупки от шефа, Суннатиллы и ваши собственные (<a href="requests.php">«Заявки на закупку»</a>). Возьмите заявку в работу — её позиции лягут в корзину заказа поставщику.</p>
 <?php if ($message): ?><p class="<?= $messageType ?>"><?= htmlspecialchars($message) ?></p><?php endif; ?>
 
 <div class="card">
   <h2>Ждут работы</h2>
   <?php if (empty($open)): ?>
-    <p class="muted">Новых заявок нет. Здесь появится список закупки, как только его пришлёт Умид или Суннатилла.</p>
+    <p class="muted">Новых заявок нет. Здесь появится список закупки, как только его отправят Умид, Суннатилла или вы с коллегой.</p>
   <?php else: ?>
     <?php foreach ($open as $r): ?>
       <?php $lines = request_lines((int)$r['rowid']); ?>
@@ -139,7 +142,7 @@ require __DIR__ . '/includes/layout_top.php';
             <span class="badge <?= request_status_badge($r['status']) ?>"><?= htmlspecialchars(request_status_label($r['status'])) ?></span>
             <div class="muted">
               <?= htmlspecialchars($directionNames[$r['direction']] ?? $r['direction']) ?>
-              · от <?= htmlspecialchars($r['created_by']) ?>, <?= date('d.m.Y', strtotime($r['created_at'])) ?>
+              · составил: <?= htmlspecialchars($authorName($r['created_by'])) ?>, <?= date('d.m.Y', strtotime($r['created_at'])) ?>
               · поставщик: <?= htmlspecialchars($r['supplier_name'] ?: 'на ваше усмотрение') ?>
               <?php if ($r['taken_by']): ?> · в работе у: <?= htmlspecialchars($r['taken_by']) ?><?php endif; ?>
             </div>

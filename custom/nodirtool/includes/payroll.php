@@ -98,6 +98,15 @@ function payroll_ensure_tables(): void
         comment VARCHAR(255) DEFAULT NULL,
         who VARCHAR(50) DEFAULT NULL,
         datec DATETIME NOT NULL,
+        -- H2 (финансовый аудит 05.09.2026): двойное начисление зарплаты при почти одновременных
+        -- запросах — живой тест дал задвоение в 4 попытках из 15 ($500+$500 одному человеку за один
+        -- месяц). Проверка «уже начислено» и сама вставка шли без защиты между ними.
+        -- Генерируемая колонка = период ТОЛЬКО у начислений, у остальных типов NULL. В MySQL/MariaDB
+        -- значения NULL в UNIQUE не конфликтуют, поэтому авансы и выплаты по-прежнему можно вносить
+        -- сколько угодно раз в месяц, а второе НАЧИСЛЕНИЕ за тот же период база просто не примет —
+        -- независимо от того, каким путём его попытались записать.
+        accrual_period VARCHAR(7) AS (CASE WHEN entry_type='accrual' THEN period END) STORED,
+        UNIQUE KEY uniq_accrual (fk_employee, accrual_period),
         INDEX idx_emp (fk_employee),
         INDEX idx_period (period)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
@@ -329,7 +338,15 @@ function payroll_accrue(int $employeeId, string $period, ?float $amountUsd, stri
                           VALUES (?, 'accrual', ?, ?, ?, ?, NOW())");
     $stmt->bind_param('isdss', $employeeId, $period, $amount, $comment, $who);
     $r = payroll_exec($stmt, 'Ошибка начисления');
-    if (!$r['ok']) return $r;
+    if (!$r['ok']) {
+        // H2: если параллельный запрос успел вставить начисление за тот же месяц, база отклонит
+        // наше по UNIQUE-ключу (код 1062). Показываем человеческий текст, а не ошибку MySQL —
+        // для кассира это просто «уже начислено», а не сбой.
+        if ((int)($r['errno'] ?? 0) === 1062) {
+            return ['ok' => false, 'error' => "За {$period} этому сотруднику уже начислено — повторно нельзя."];
+        }
+        return $r;
+    }
     return ['ok' => true, 'amount' => $amount];
 }
 
@@ -482,6 +499,25 @@ function household_add_category(string $name): array
     return ['ok' => true, 'id' => $db->insert_id];
 }
 
+/**
+ * Переименовать категорию. Безопасно: расходы хранят ссылку на категорию (fk_category), а название
+ * в банковской проводке остаётся историческим — прошлые записи читаются как прежде.
+ */
+function household_rename_category(int $id, string $name): array
+{
+    payroll_ensure_tables();
+    $name = trim($name);
+    if ($name === '') return ['ok' => false, 'error' => 'Название не может быть пустым.'];
+    $db = payroll_db();
+    $stmt = $db->prepare("UPDATE llx_nt_expense_category SET name=? WHERE rowid=?");
+    $stmt->bind_param('si', $name, $id);
+    $r = payroll_exec($stmt);
+    if (!$r['ok']) {
+        return ['ok' => false, 'error' => ($r['errno'] ?? 0) === 1062 ? 'Такая категория уже есть.' : $r['error']];
+    }
+    return ['ok' => true];
+}
+
 function household_set_category_active(int $id, bool $active): void
 {
     payroll_ensure_tables();
@@ -520,13 +556,37 @@ function household_record_expense(DolibarrApi $api, int $categoryId, string $dat
     return ['ok' => true, 'category' => $catName];
 }
 
-function household_delete_expense(DolibarrApi $api, int $expenseId): array
+/**
+ * Удалить хозрасход. Деньги возвращаются обратной проводкой на тот же счёт.
+ *
+ * LOW-пункт финансового аудита (05.09.2026): удалять может ТОЛЬКО тот, кто вносил. Расходы всех
+ * четверых (Нодир, Абдурашид, Умид, Суннатилла) лежат в одной таблице, и раньше любой из закупщиков
+ * мог удалить чужую строку — в том числе внесённую руководством через свой инструмент. Деньги при
+ * этом не пропадали (возвращались на счёт), но право на чужую запись было лишним.
+ *
+ * $who — как подписался текущий пользователь. Сравниваем и с именем, и с логином: NodirTool пишет в
+ * поле `who` отображаемое имя («Нодир»), а BossTool — логин («umid»). Поэтому $whoAliases.
+ */
+function household_delete_expense(DolibarrApi $api, int $expenseId, array $whoAliases = []): array
 {
     payroll_ensure_tables();
     $db = payroll_db();
     $res = $db->query("SELECT * FROM llx_nt_household_expense WHERE rowid=" . (int)$expenseId);
     if (!$res || !$res->num_rows) return ['ok' => false, 'error' => 'Расход не найден.'];
     $e = $res->fetch_assoc();
+
+    if ($whoAliases) {
+        $author = trim((string)($e['who'] ?? ''));
+        $mine = false;
+        foreach ($whoAliases as $alias) {
+            $alias = trim((string)$alias);
+            if ($alias !== '' && mb_strtolower($alias) === mb_strtolower($author)) { $mine = true; break; }
+        }
+        if (!$mine) {
+            return ['ok' => false, 'error' => 'Этот расход внёс ' . ($author !== '' ? $author : 'другой сотрудник')
+                . ' — удалить его может только он. Если запись ошибочная, попросите удалить её автора.'];
+        }
+    }
     // Деньги возвращаем обратной проводкой на тот же счёт той же суммой — как у логистики.
     $note = '';
     if (!empty($e['fk_bank']) && (float)$e['native_amount'] > 0) {
@@ -595,6 +655,22 @@ function income_add_source(string $name): array
         return ['ok' => false, 'error' => ($r['errno'] ?? 0) === 1062 ? 'Такой источник уже есть.' : $r['error']];
     }
     return ['ok' => true, 'id' => $db->insert_id];
+}
+
+/** Переименовать источник дохода — так же безопасно, как и категорию расхода. */
+function income_rename_source(int $id, string $name): array
+{
+    payroll_ensure_tables();
+    $name = trim($name);
+    if ($name === '') return ['ok' => false, 'error' => 'Название не может быть пустым.'];
+    $db = payroll_db();
+    $stmt = $db->prepare("UPDATE llx_nt_income_source SET name=? WHERE rowid=?");
+    $stmt->bind_param('si', $name, $id);
+    $r = payroll_exec($stmt);
+    if (!$r['ok']) {
+        return ['ok' => false, 'error' => ($r['errno'] ?? 0) === 1062 ? 'Такой источник уже есть.' : $r['error']];
+    }
+    return ['ok' => true];
 }
 
 function income_set_source_active(int $id, bool $active): void

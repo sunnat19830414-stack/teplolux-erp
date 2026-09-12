@@ -85,7 +85,10 @@ require __DIR__ . '/includes/layout_top.php';
     <input type="hidden" name="action" value="convert">
     <div>
       <label>Сумма в сумах</label>
-      <input type="number" step="1" min="1" name="uzs_amount" required>
+      <!-- Замечание Абдурашида 05.09.2026: шаг был 1, и браузер не давал ввести тийины после
+           запятой («два ближайших допустимых значения: 282225590 и 282225591»). В выписке из
+           банка сумма приходит с копейками, округлять её на входе нельзя. -->
+      <input type="number" step="0.01" min="0.01" name="uzs_amount" required>
     </div>
     <div>
       <label>Курс (сум за 1 ед. валюты)</label>

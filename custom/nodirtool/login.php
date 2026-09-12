@@ -3,12 +3,18 @@ require_once __DIR__ . '/includes/session_boot.php';
 session_start();
 $cfg = require __DIR__ . '/config.php';
 
+require_once __DIR__ . '/includes/login_guard.php';   // защита от перебора паролей (12.09.2026)
+
 $error = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $login = trim($_POST['login'] ?? '');
     $password = $_POST['password'] ?? '';
+    $guard = login_guard_check('nodir', $login);
     $u = $cfg['users'][$login] ?? null;
-    if ($u && hash_equals($u['password'], $password)) {
+    if ($guard['blocked']) {
+        $error = login_guard_message((int)$guard['minutes']);
+    } elseif ($u && hash_equals($u['password'], $password)) {
+        login_guard_record('nodir', $login, true);
         // S-1 (внешний QA-аудит, раунд 2, 03.09.2026): раньше здесь НЕ было session_regenerate_id() —
         // если кто-то заранее "подсунул" идентификатор сессии (например, через открытую вкладку до
         // входа), он оставался действительным и ПОСЛЕ входа. TeplouxKassa это уже делала у себя;
@@ -18,7 +24,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         header('Location: index.php');
         exit;
     }
-    $error = 'Неверный логин или пароль.';
+    else {
+        login_guard_record('nodir', $login, false);
+        $left = login_guard_check('nodir', $login);
+        $error = 'Неверный логин или пароль.'
+               . ($left['blocked'] ? ' ' . login_guard_message((int)$left['minutes'])
+                                   : ($left['left'] <= 2 ? ' Осталось попыток: ' . (int)$left['left'] . '.' : ''));
+    }
 }
 ?>
 <!doctype html>

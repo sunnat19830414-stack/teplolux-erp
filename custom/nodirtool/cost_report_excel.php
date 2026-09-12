@@ -77,7 +77,7 @@ xls_send_headers('Cost_report.xls', 'Себестоимость_по_товар�
        : 'Заказ ' . ($orderLabel[$r['scope_id']] ?? ('#' . $r['scope_id']));
      $expenseParts = [];
      foreach ($r['expenses'] as $type => $amt) {
-         if ($amt > 0.01) $expenseParts[] = (LOGISTICS_EXPENSE_TYPES[$type] ?? $type) . ': ' . number_format($amt, 2, '.', '') . '$';
+         if ($amt > 0.01) $expenseParts[] = logistics_expense_type_label($type) . ': ' . number_format($amt, 2, '.', '') . '$';
      }
    ?>
    <Row>

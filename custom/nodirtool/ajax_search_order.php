@@ -3,9 +3,22 @@ require_once __DIR__ . '/includes/auth.php';
 header('Content-Type: application/json; charset=utf-8');
 
 $term = trim($_GET['q'] ?? '');
-if ($term === '') { echo '[]'; exit; }
 
-$rows = $api->searchSupplierOrders($term, 20);
+// Пустое поле — показываем ДЕЙСТВУЮЩИЕ заказы: утверждённые, отправленные поставщику и принятые
+// частично. Раньше на пустой запрос отдавался пустой список, и при щелчке в поле «Номер заказа»
+// ничего не выпадало, хотя у перевозчиков тот же щелчок сразу показывает всех (замечание
+// пользователя 11.09.2026, «Перевозки»). Черновики и уже полностью полученные/отменённые не нужны:
+// везут и собирают в партии именно действующие. Поиск по номеру по-прежнему находит любые.
+if ($term === '') {
+    $rows = [];
+    foreach (['approved', 'running', 'received_start'] as $st) {
+        foreach ((array)$api->getSupplierOrdersByStatus($st, 'id,ref,socid,statut,total_ttc') as $o) $rows[] = $o;
+    }
+    usort($rows, fn($a, $b) => (int)$b['id'] <=> (int)$a['id']);
+    $rows = array_slice($rows, 0, 30);
+} else {
+    $rows = $api->searchSupplierOrders($term, 20);
+}
 $statusLabels = [
     0 => 'Черновик', 1 => 'Проведён', 2 => 'Утверждён', 3 => 'Отправлен поставщику',
     4 => 'Частично получен', 5 => 'Получен полностью', 6 => 'Отменён', 7 => 'Отменён', 9 => 'Отклонён',

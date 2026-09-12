@@ -4,6 +4,7 @@
  * лёгкий приём, что в NodirTool/includes/product_lookup.php (батч-выборок такого рода REST не даёт,
  * а по одному товару за раз это десятки запросов на каждое нажатие клавиши в поиске).
  */
+require_once __DIR__ . '/sellable_stock.php';
 
 function stock_lookup_db(): mysqli
 {
@@ -80,17 +81,17 @@ function stock_price_rows(array $directions, array $f = [], int $limit = 400): a
                             WHERE fx.fk_product = p.rowid AND fx.fk_soc = " . (int)$f['supplier'] . ")";
     }
     if (isset($f['stock_from']) && $f['stock_from'] !== '') {
-        $where[] = 'p.stock >= ' . (float)$f['stock_from'];
+        $where[] = nt_sellable_stock_sql($db, 'p') . ' >= ' . (float)$f['stock_from'];
     }
     if (isset($f['stock_to']) && $f['stock_to'] !== '') {
-        $where[] = 'p.stock <= ' . (float)$f['stock_to'];
+        $where[] = nt_sellable_stock_sql($db, 'p') . ' <= ' . (float)$f['stock_to'];
     }
     if (!empty($f['only_stock'])) {
-        $where[] = 'p.stock > 0';
+        $where[] = nt_sellable_stock_sql($db, 'p') . ' > 0';
     }
 
     // Заводская цена — от поставщика с самой свежей записью (у товара их может быть несколько).
-    $sql = "SELECT p.rowid AS id, p.ref, p.label, p.price, p.pmp, p.stock, e.kod_sap,
+    $sql = "SELECT p.rowid AS id, p.ref, p.label, p.price, p.pmp, " . nt_sellable_stock_sql($db, 'p') . " AS stock, e.kod_sap,
                    f.fk_soc, f.unitprice AS f_usd, f.multicurrency_code AS f_cur,
                    f.multicurrency_unitprice AS f_native, f.multicurrency_tx AS f_rate,
                    s.nom AS supplier

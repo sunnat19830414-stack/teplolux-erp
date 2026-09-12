@@ -204,6 +204,12 @@ require __DIR__ . '/includes/layout_top.php';
           <strong><?= htmlspecialchars($doc['doc_ref']) ?></strong>
           <span class="muted"><?= htmlspecialchars($doc['date']) ?></span>
           <span class="doc-block-total"><?= number_format($doc['total'], 2) ?> $</span>
+          <?php if (!empty($doc['doc_id'])): ?>
+            <?php // Скачать любой документ клиента — и накладную, и возврат (замечание Жамшида 07.09.2026):
+                  // раньше выгрузить возврат можно было только сразу после оформления, старый — никак. ?>
+            <a class="doc-block-xls" href="invoice_excel.php?id=<?= (int)$doc['doc_id'] ?>"
+               title="Скачать документ в Excel">📄</a>
+          <?php endif; ?>
         </div>
         <?php if (!empty($doc['lines'])): ?>
         <table>

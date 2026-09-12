@@ -80,7 +80,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
         $newS = $num($sale[$pid] ?? '');
         $oldS = $num($origS[$pid] ?? '');
         if ($newS !== null && ($oldS === null || abs($newS - $oldS) > 0.00005)) {
-            if ($api->saveSalePrice($pid, $newS)) $changed['sale']++;
+            if ($api->saveSalePrice($pid, $newS)) $changed['sale']++;   // сразу все три уровня (11.09.2026)
             else $errors[] = "#$pid: цена продажи — " . $api->lastError;
         }
     }

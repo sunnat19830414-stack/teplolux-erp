@@ -1,5 +1,12 @@
 <?php
 /**
+ * ⚠️ В документах, которые уходят клиенту, символ валюты НЕ показываем (решение 10.09.2026).
+ * Причина деловая, а не оформительская: в Узбекистане запрещена розничная торговля в валюте.
+ * Документ без символа читается как сумма в сумах; документ со знаком доллара — это готовое
+ * доказательство обратного. На внутренних экранах (sale.php, return.php и т.п.) знак остаётся,
+ * там он нужен продавцу. Не возвращать сюда «$», «USD» и подобное.
+ */
+/**
  * Выгрузка истории клиента (покупки/возвраты + оплаты) в Excel — ОДИН лист, разделы друг под другом
  * (специально не разносим по отдельным вкладкам листа — легко не заметить вторую вкладку и решить,
  * что данных там нет; на экране reports.php оба раздела тоже идут один под другим на одной странице).
@@ -68,7 +75,7 @@ xls_send_headers(
    <Row><?= xls_cell_str('Cell', 'Нет данных по товарам за этот фильтр.', 5) ?></Row>
    <?php else: ?>
    <Row>
-    <?= xls_cell_str('Label', 'Товар') ?><?= xls_cell_str('Label', 'Артикул') ?><?= xls_cell_str('Label', 'Куплено, шт') ?><?= xls_cell_str('Label', 'Куплено, $') ?><?= xls_cell_str('Label', 'Возвращено, шт') ?><?= xls_cell_str('Label', 'Возвращено, $') ?>
+    <?= xls_cell_str('Label', 'Товар') ?><?= xls_cell_str('Label', 'Артикул') ?><?= xls_cell_str('Label', 'Куплено, шт') ?><?= xls_cell_str('Label', 'Куплено') ?><?= xls_cell_str('Label', 'Возвращено, шт') ?><?= xls_cell_str('Label', 'Возвращено') ?>
    </Row>
    <?php foreach ($history['by_product'] as $row): ?>
    <Row>
@@ -87,14 +94,14 @@ xls_send_headers(
    <Row><?= xls_cell_str('SubTitle', 'Документы (покупки, возвраты, авансы)', 3) ?></Row>
    <Row/>
    <Row>
-    <?= xls_cell_str('Label', 'Товар') ?><?= xls_cell_str('Label', 'Артикул') ?><?= xls_cell_str('Label', 'Кол-во') ?><?= xls_cell_str('Label', 'Сумма, $') ?>
+    <?= xls_cell_str('Label', 'Товар') ?><?= xls_cell_str('Label', 'Артикул') ?><?= xls_cell_str('Label', 'Кол-во') ?><?= xls_cell_str('Label', 'Сумма') ?>
    </Row>
    <?php if (empty($history['documents'])): ?>
    <Row><?= xls_cell_str('Cell', 'Ничего не найдено по этому фильтру.', 3) ?></Row>
    <?php endif; ?>
    <?php foreach ($history['documents'] as $doc): ?>
    <Row>
-    <?= xls_cell_str('Header', $doc['type_label'] . ' ' . $doc['doc_ref'] . ' от ' . $doc['date'] . ' — итого ' . number_format($doc['total'], 2, '.', '') . ' $', 3) ?>
+    <?= xls_cell_str('Header', $doc['type_label'] . ' ' . $doc['doc_ref'] . ' от ' . $doc['date'] . ' — итого ' . number_format($doc['total'], 2, '.', '') , 3) ?>
    </Row>
    <?php foreach ($doc['lines'] as $line): ?>
    <Row>
@@ -111,7 +118,7 @@ xls_send_headers(
    <Row><?= xls_cell_str('SubTitle', 'Оплаты', 3) ?></Row>
    <Row/>
    <Row>
-    <?= xls_cell_str('Label', 'Дата') ?><?= xls_cell_str('Label', 'Счёт') ?><?= xls_cell_str('Label', 'Способ оплаты') ?><?= xls_cell_str('Label', 'Сумма, $') ?>
+    <?= xls_cell_str('Label', 'Дата') ?><?= xls_cell_str('Label', 'Счёт') ?><?= xls_cell_str('Label', 'Способ оплаты') ?><?= xls_cell_str('Label', 'Сумма') ?>
    </Row>
    <?php if (empty($history['payments'])): ?>
    <Row><?= xls_cell_str('Cell', 'Оплат не было.', 3) ?></Row>

@@ -59,20 +59,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($action === 'add_expense') {
         $batchId = (int)($_POST['batch_id'] ?? 0);
         $expenseType = $_POST['expense_type'] ?? '';
-        $mode = $_POST['amount_mode'] ?? 'usd';
         $comment = trim($_POST['comment'] ?? '');
         $who = $_SESSION['user']['name'] ?? '';
         // Перевозчик (необязательно, топ-5 пункт 3) — если выбран, деньги не списываются сразу, это
         // становится долгом перевозчику (гасится отдельно в разделе "Перевозчики").
         $carrierId = (int)($_POST['carrier_id'] ?? 0) ?: null;
 
-        if ($mode === 'usd') {
-            $amount = (float)($_POST['usd_amount'] ?? 0);
-            $r = logistics_record_expense('batch', $batchId, $expenseType, $amount, 'USD', null, (int)$cfg['currency_accounts']['USD'], $who, $comment, $carrierId);
+        // Счёт выбирает человек (11.09.2026, «платят по-разному»): своя касса, банк в сумах или
+        // валютный счёт. Валюта расхода = валюта счёта. Если выбран перевозчик, деньги не двигаются —
+        // счёт тогда задаёт только валюту долга.
+        require_once __DIR__ . '/includes/expense_accounts.php';
+        $payAccounts = expense_payment_accounts(logistics_db(), $cfg, (string)($_SESSION['user']['login'] ?? ''));
+        $pay = expense_parse_payment($_POST, $payAccounts);
+        // Фрахт по грузу, у которого уже есть рейс, — только через «Перевозчики» (см. shipment_blocking_freight).
+        require_once __DIR__ . '/includes/shipments.php';
+        $blockShip = $expenseType === 'freight' ? shipment_blocking_freight('batch', (int)$batchId) : null;
+        if ($blockShip) {
+            $r = ['ok' => false, 'error' => shipment_freight_block_message($blockShip)];
+        } elseif (!$pay['ok']) {
+            $r = ['ok' => false, 'error' => $pay['error']];
         } else {
-            $uzsAmount = (float)($_POST['uzs_amount'] ?? 0);
-            $rate = (float)($_POST['rate'] ?? 0);
-            $r = logistics_record_expense('batch', $batchId, $expenseType, $uzsAmount, 'UZS', $rate, (int)$cfg['uzs_account_id'], $who, $comment, $carrierId);
+            $r = logistics_record_expense('batch', $batchId, $expenseType, $pay['amount'], $pay['currency'], $pay['rate'],
+                                          $pay['account'], $who, $comment, $carrierId);
         }
 
         if (!($r['ok'] ?? false)) {
@@ -156,7 +164,7 @@ $carrierNamesById = $carrierIdsInExpenses ? $api->getThirdpartiesByIds($carrierI
 require __DIR__ . '/includes/layout_top.php';
 ?>
 
-<h1>Партии / Логистика</h1>
+<h1>Партии и расходы</h1>
 <?php if ($selectedBatch): ?>
   <form method="post" style="margin-bottom:14px">
   <?= csrf_field() ?>
@@ -269,26 +277,17 @@ require __DIR__ . '/includes/layout_top.php';
       <div>
         <label>Вид расхода</label>
         <select name="expense_type">
-          <?php foreach (LOGISTICS_EXPENSE_TYPES as $key => $label): ?>
+          <?php foreach (logistics_expense_types() as $key => $label): ?>
             <option value="<?= $key ?>"><?= htmlspecialchars($label) ?></option>
           <?php endforeach; ?>
         </select>
       </div>
-      <div>
-        <label>Оплачено в</label>
-        <select name="amount_mode" id="amountMode" onchange="document.getElementById('usdBlock').style.display=this.value=='usd'?'':'none'; document.getElementById('uzsBlock').style.display=this.value=='uzs'?'':'none';">
-          <option value="usd">$ напрямую</option>
-          <option value="uzs">сумах (+ курс)</option>
-        </select>
-      </div>
     </div>
-    <div class="row" id="usdBlock">
-      <div><label>Сумма, $</label><input type="number" step="0.01" min="0.01" name="usd_amount"></div>
-    </div>
-    <div class="row" id="uzsBlock" style="display:none">
-      <div><label>Сумма, сум</label><input type="number" step="1" min="1" name="uzs_amount"></div>
-      <div><label>Курс (сум за 1$)</label><input type="number" step="0.01" min="0.01" name="rate"></div>
-    </div>
+    <?php
+      require_once __DIR__ . '/includes/expense_accounts.php';
+      echo expense_payment_fields_html(logistics_db(),
+          expense_payment_accounts(logistics_db(), $cfg, (string)($_SESSION['user']['login'] ?? '')), 'B');
+    ?>
     <div>
       <label>Перевозчик (необязательно — если выбран, деньги СЕЙЧАС не списываются, это становится долгом, оплатите его в разделе «Перевозчики»)</label>
       <input type="hidden" name="carrier_id" id="expCarrierId">
@@ -317,13 +316,16 @@ require __DIR__ . '/includes/layout_top.php';
       <?php foreach ($expenses as $e): ?>
         <?php $carr = !empty($e['fk_carrier']) ? ($carrierNamesById[(int)$e['fk_carrier']] ?? null) : null; ?>
         <tr>
-          <td><?= htmlspecialchars(LOGISTICS_EXPENSE_TYPES[$e['expense_type']] ?? $e['expense_type']) ?></td>
+          <td><?= htmlspecialchars(logistics_expense_type_label($e['expense_type'])) ?></td>
           <td><?= number_format((float)$e['native_amount'], 2) ?> <?= htmlspecialchars($e['native_currency']) ?><?= $e['rate'] ? ' (курс ' . number_format((float)$e['rate'], 2) . ')' : '' ?></td>
           <td><?= number_format((float)$e['usd_amount'], 2) ?> $</td>
           <td class="muted"><?= $carr ? htmlspecialchars($carr['name'] ?? $carr['nom'] ?? '') : '—' ?></td>
           <td class="muted"><?= htmlspecialchars(substr($e['datec'], 0, 16)) ?></td>
           <td class="muted"><?= htmlspecialchars($e['comment']) ?></td>
           <td>
+<?php if ($e['expense_type'] === 'fx_diff'): ?>
+              <span class="muted small" title="Считается сама по оплатам рейса">авто</span>
+            <?php else: ?>
             <form method="post" onsubmit="return appConfirmSubmit(this, 'Удалить этот расход? Если по нему списывались деньги — они будут возвращены на счёт, себестоимость пересчитается заново.');">
   <?= csrf_field() ?>
               <input type="hidden" name="action" value="delete_expense">
@@ -331,6 +333,7 @@ require __DIR__ . '/includes/layout_top.php';
               <input type="hidden" name="expense_id" value="<?= (int)$e['rowid'] ?>">
               <button type="submit" class="secondary small">✕</button>
             </form>
+            <?php endif; ?>
           </td>
         </tr>
       <?php endforeach; ?>
@@ -338,7 +341,7 @@ require __DIR__ . '/includes/layout_top.php';
   <?php endif; ?>
 </div>
 
-<script src="assets/picker.js"></script>
+<script src="assets/picker.js?v=20260911"></script>
 <script>
 function selectCarrierIntoExpenseForm(c) {
   const idInput = document.getElementById('expCarrierId');

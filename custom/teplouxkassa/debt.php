@@ -70,6 +70,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $payErrors = [];
             $receiptItems = [];
+            $uzsErrors = [];
             foreach ($paySplit as $key => $amt) {
                 $acc = $cfg['payment_accounts'][$key];
                 $label = paySplitLabel($acc['label'], $payDetail[$key]);
@@ -78,13 +79,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $payErrors[] = "{$acc['label']}: {$api->lastError}";
                 } else {
                     $receiptItems[] = ['ref' => $invRef, 'method' => $acc['label'], 'amount' => $amt, 'uzs' => $payDetail[$key]['uzs'], 'rate' => $payDetail[$key]['rate']];
+                    // H5: сумовая проводка сразу за успешной оплатой этого способа, а не пакетом
+                    // после цикла — иначе сбой второго способа обнулял бы учёт и по первому.
+                    $err = postUzsLedgerOne($api, $cfg, (string)$key, $payDetail[$key],
+                        'Погашение долга по счёту #' . $invoiceId . ', касса ' . $cfg['direction_label']);
+                    if ($err !== null) $uzsErrors[] = $err;
                 }
             }
             if ($payErrors) {
                 $message = 'Ошибка приёма оплаты: ' . implode('; ', $payErrors);
+                if ($receiptItems) {
+                    $message .= ' Часть оплаты всё же прошла и записана — доплату проведите повторно.';
+                }
+                if ($uzsErrors) $message .= "\nВНИМАНИЕ, сумовый счёт: " . implode('; ', $uzsErrors);
                 $messageType = 'err';
             } else {
-                $uzsErrors = postUzsLedger($api, $cfg, $payDetail, 'Погашение долга по счёту #' . $invoiceId . ', касса ' . $cfg['direction_label']);
                 $message = "Оплата по счёту #$invoiceId принята: " . implode(' + ', array_map(fn($i) => paySplitLabel($i['method'], ['usd' => $i['amount'], 'uzs' => $i['uzs'], 'rate' => $i['rate']]), $receiptItems)) . ".";
                 if ($uzsErrors) $message .= "\nВНИМАНИЕ, сумовый счёт: " . implode('; ', $uzsErrors);
                 $messageType = $uzsErrors ? 'err' : 'ok';
@@ -146,6 +155,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $payErrors = [];
             $receiptItems = [];
             $totalApplied = 0.0;
+            $uzsErrorsFifo = [];   // H5: сумовые проводки идут по каждому способу внутри цикла
             $leftover = 0.0;
             // S-2: остаток по КАЖДОМУ доллар-способу отдельно (не общей суммой) — у разных способов
             // разные кассовые счета, излишек каждого должен лечь именно на СВОЙ счёт.
@@ -168,7 +178,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 unset($inv);
                 $leftover += $remaining;
                 if ($remaining > 0.01 && ($payDetail[$key]['uzs'] ?? null) === null) {
-                    // Способ в USD (наличные) — сумовые уже полностью покрыты postUzsLedger() ниже
+                    // Способ в USD (наличные) — сумовые проводятся отдельно, по каждому способу (H5)
                     // независимо от применения, см. S-2.
                     $cashLeftoverByMethod[$key] = $remaining;
                 }
@@ -188,6 +198,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ];
                     $totalApplied += (float)$amt;
                 }
+                // H5: сумовая проводка сразу за успешной оплатой этого способа.
+                $errU = postUzsLedgerOne($api, $cfg, (string)$key, $payDetail[$key],
+                    'Приём оплаты (FIFO), касса ' . $cfg['direction_label'] . ' — ' . ($_SESSION['debt_client']['name'] ?? ''));
+                if ($errU !== null) $uzsErrorsFifo[] = $errU;
             }
 
             if ($payErrors) {
@@ -200,7 +214,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 // Реальные суммы в сумах кладём на сумовый счёт независимо от того, как они легли на
                 // счета клиента — деньги физически поступили в банк в любом случае, даже если часть
                 // оказалась "лишней" сверх долга.
-                $uzsErrors = postUzsLedger($api, $cfg, $payDetail, 'Приём оплаты (FIFO), касса ' . $cfg['direction_label'] . ' — ' . ($_SESSION['debt_client']['name'] ?? ''));
+                // Сумовые проводки уже сделаны выше, по каждому способу отдельно (H5).
+                $uzsErrors = $uzsErrorsFifo;
                 // S-2 (внешний QA-аудит, раунд 2, 03.09.2026): излишек наличных (сверх долга) раньше
                 // нигде не оседал — кассир реально принял деньги, а касса в Dolibarr их не видела.
                 // Кладём напрямую на кассовый счёт направления, отдельной проводкой, как обычную
@@ -231,44 +246,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
             }
         }
-    } elseif ($action === 'handover_cash') {
+    } elseif (in_array($action, ['handover_cancel'], true)) {
+        require_once __DIR__ . '/includes/cash_handover.php';
         $cashAcc = $cfg['payment_accounts']['cash'] ?? null;
+        $hr = handover_handle_post($_POST, $cashAcc ? [(int)$cashAcc['id']] : [], 'Касса ' . $cfg['direction_label'], (int)$cfg['api_user_id'],
+                                   fn($a, $c) => number_format($a, 2) . ' $');
+        if ($hr) { flash_set($hr[0], $hr[1]); header('Location: debt.php'); exit; }
+    } elseif ($action === 'handover_cash') {
+        // С подтверждением получателя (11.09.2026, includes/cash_handover.php): касса НЕ обнуляется сразу —
+        // деньги спишутся, когда Нодир/Суннатилла нажмёт «Принял». До этого передачу можно отменить.
+        require_once __DIR__ . '/includes/cash_handover.php';
+        $cashAcc = $cfg['payment_accounts']['cash'] ?? null;
+        $recipient = $cfg['cash_recipient_label'] ?? '';
+        $recipientAccId = (int)($cfg['cash_recipient_account_id'] ?? 0);
         if (!$cashAcc) {
             $message = 'Не настроен кассовый счёт наличных.';
             $messageType = 'err';
         } else {
-            $balance = $api->getAccountBalance($cashAcc['id']);
-            if ($balance === null) {
-                $message = 'Не удалось получить остаток кассы: ' . $api->lastError;
-                $messageType = 'err';
-            } elseif ($balance <= 0.01) {
-                $message = 'В кассе и так пусто — нечего передавать.';
+            $r = handover_create((int)$cashAcc['id'], 'Касса ' . $cfg['direction_label'], $recipientAccId, $recipient,
+                                 null, 'Касса ' . $cfg['direction_label'], trim($_POST['comment'] ?? ''));
+            if (empty($r['ok'])) {
+                $message = 'Касса НЕ передана: ' . $r['error'];
                 $messageType = 'err';
             } else {
-                $recipient = trim($_POST['recipient'] ?? '') ?: ($cfg['cash_recipient_label'] ?? '');
-                $recipientAccId = $cfg['cash_recipient_account_id'] ?? null;
-                $label = 'Передача наличной кассы ' . $cfg['direction_label'] . ($recipient !== '' ? (' — принял: ' . $recipient) : '');
-                // Списание со счёта кассира — обязательная часть, без неё ничего не делаем.
-                $out = $api->addBankLine($cashAcc['id'], $label, -1 * $balance, 'LIQ');
-                if ($out === null) {
-                    $message = 'Ошибка при передаче кассы: ' . $api->lastError;
-                    $messageType = 'err';
-                } else {
-                    // Настоящий перевод — деньги должны появиться на счёте того, кто их принял, а не
-                    // просто исчезнуть. Если счёт получателя не настроен — списание уже произошло,
-                    // явно предупреждаем, а не проваливаем всю операцию задним числом.
-                    $inWarning = '';
-                    if ($recipientAccId) {
-                        $in = $api->addBankLine((int)$recipientAccId, $label, $balance, 'LIQ');
-                        if ($in === null) {
-                            $inWarning = ' ВНИМАНИЕ: списано со счёта кассира, но НЕ зачислено получателю: ' . $api->lastError . '. Поправьте вручную.';
-                        }
-                    } else {
-                        $inWarning = ' ВНИМАНИЕ: счёт получателя не настроен — деньги списаны, но никуда не зачислены.';
-                    }
-                    $message = 'Касса передана: ' . number_format($balance, 2) . ' $' . ($recipient !== '' ? (' → ' . $recipient) : '') . '. Остаток обнулён.' . $inWarning;
-                    $messageType = $inWarning ? 'err' : 'ok';
-                }
+                flash_set('Касса ' . number_format($r['amount'], 2) . ' $ передана: ' . $recipient . '. Когда он подтвердит, что принял, '
+                          . 'остаток кассы уменьшится. До этого передачу можно отменить.', 'ok');
+                header('Location: debt.php');
+                exit;
             }
         }
     }
@@ -285,6 +289,10 @@ if ($flash) {
 // "передачи кассы" сразу показать обнулённый остаток, не дожидаясь отдельной перезагрузки
 $cashAcc = $cfg['payment_accounts']['cash'] ?? null;
 $cashBalance = $cashAcc ? $api->getAccountBalance($cashAcc['id']) : null;
+require_once __DIR__ . '/includes/cash_handover.php';
+$cashPending = $cashAcc ? handover_pending_out((int)$cashAcc['id']) : 0.0;
+$cashAvail = $cashBalance !== null ? round((float)$cashBalance - $cashPending, 2) : 0.0;
+$hOut = $cashAcc ? handover_list([], [(int)$cashAcc['id']], ['pending', 'rejected', 'confirmed'], 6) : [];
 
 $debtors = [];
 if (empty($_SESSION['debt_client'])) {
@@ -374,20 +382,23 @@ require __DIR__ . '/includes/layout_top.php';
       <div>
         <div style="font-size:26px; font-weight:700;"><?= number_format($cashBalance, 2) ?> $</div>
         <div class="muted">наличными в кассе сейчас</div>
+        <?php if ($cashPending > 0.004): ?>
+          <div class="muted">из них <?= number_format($cashPending, 2) ?> $ передано <?= htmlspecialchars($cfg['cash_recipient_label'] ?? '') ?> и ждёт подтверждения</div>
+        <?php endif; ?>
       </div>
-      <?php if ($cashBalance > 0.01): ?>
+      <?php if ($cashAvail > 0.01): ?>
       <form method="post" style="flex:0; display:flex; gap:8px; align-items:center"
-            onsubmit="return appConfirmSubmit(this, 'Передать кассу — обнулить остаток наличных (<?= number_format($cashBalance, 2) ?> $)?');">
+            onsubmit="return appConfirmSubmit(this, 'Передать кассу <?= number_format($cashAvail, 2) ?> $ — <?= htmlspecialchars($cfg['cash_recipient_label'] ?? '', ENT_QUOTES) ?>? Остаток уменьшится, когда он подтвердит, что принял.');">
         <?= csrf_field() ?>
         <input type="hidden" name="action" value="handover_cash">
-        <input type="text" name="recipient" placeholder="Кому передано"
-               value="<?= htmlspecialchars($cfg['cash_recipient_label'] ?? '') ?>" style="min-width:150px; margin:0">
-        <button type="submit" class="danger">Передать кассу</button>
+        <button type="submit" class="danger">Передать кассу <?= number_format($cashAvail, 2) ?> $ — <?= htmlspecialchars($cfg['cash_recipient_label'] ?? '') ?></button>
       </form>
       <?php endif; ?>
     </div>
   <?php endif; ?>
 </div>
+
+<?= handover_render([], $hOut, csrf_field(), fn($a, $c) => number_format($a, 2) . ' $') ?>
 
 <div class="card">
   <h2>Клиент</h2>

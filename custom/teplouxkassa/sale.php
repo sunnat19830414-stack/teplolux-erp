@@ -72,8 +72,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // при обычной работе через интерфейс, но прямой POST мог подставить чужой товар/склад
             // другого направления). Цена/название берём из этого же свежего ответа, а не из формы.
             $freshProduct = $api->getProduct($productId, true);
+            require_once __DIR__ . '/includes/pricing.php';
+            $priceBlocked = is_array($freshProduct) ? pricing_blocked([$productId]) : [];
             if (!is_array($freshProduct) || !product_belongs_to_direction($freshProduct, $cfg['ref_prefix'])) {
                 $message = 'Этот товар не найден или относится к другому направлению.';
+                $messageType = 'err';
+            } elseif ($priceBlocked) {
+                // Вариант «б» (11.09.2026): после нового прихода цена стала не выше себестоимости —
+                // не продаём, пока руководство не поставит цену (includes/pricing.php).
+                $message = pricing_blocked_message($priceBlocked);
                 $messageType = 'err';
             } else {
                 $_SESSION['cart'][] = [
@@ -221,12 +228,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         foreach ($discountedCart as $item) { $cartTotalHt += $item['discounted_price'] * $item['qty']; }
         $cartTotalCheck = round($cartTotalHt * (1 + $cfg['vat_rate'] / 100), 2);
         $stockProblems = empty($_SESSION['cart']) ? [] : check_cart_stock($api, $cfg, $_SESSION['cart']);
+        // вариант «б»: товар мог попасть в корзину (или черновик) до того, как пришла новая партия
+        require_once __DIR__ . '/includes/pricing.php';
+        $priceBlocked = empty($_SESSION['cart']) ? [] : pricing_blocked(array_column($_SESSION['cart'], 'product_id'));
 
         if (empty($_SESSION['sale_client']['id'])) {
             $message = 'Сначала выберите клиента.';
             $messageType = 'err';
         } elseif (empty($_SESSION['cart'])) {
             $message = 'Корзина пуста.';
+            $messageType = 'err';
+        } elseif ($priceBlocked) {
+            $message = pricing_blocked_message($priceBlocked) . ' Уберите эти позиции из корзины или дождитесь новой цены — счёт НЕ создан.';
             $messageType = 'err';
         } elseif ($stockProblems) {
             // Документ НЕ создаётся вообще, если остатка не хватает хотя бы по одной позиции — раньше
@@ -325,6 +338,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 // указать частичную сумму, обычный addPayment всегда платит "остаток целиком").
                                 $payErrors = [];
                                 $paidLabels = [];
+                                $uzsErrors = [];
                                 foreach ($paySplit as $key => $amt) {
                                     $acc = $cfg['payment_accounts'][$key];
                                     $label = paySplitLabel($acc['label'], $payDetail[$key]);
@@ -336,10 +350,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                         $payErrors[] = "{$acc['label']}: {$api->lastError}";
                                     } else {
                                         $paidLabels[] = $label;
+                                        // H5 (финансовый аудит 05.09.2026): сумовую проводку делаем
+                                        // СРАЗУ за успешной оплатой этого способа, а не пакетом после
+                                        // всего цикла. Раньше при сбое ЛЮБОГО способа пакет не
+                                        // выполнялся вовсе — долг клиента уже был уменьшен на сумму
+                                        // успешных способов, а принятые деньги в учёт не попадали.
+                                        $err = postUzsLedgerOne($api, $cfg, (string)$key, $payDetail[$key],
+                                            'Продажа #' . $invoiceId . ', касса ' . $cfg['direction_label']);
+                                        if ($err !== null) $uzsErrors[] = $err;
                                     }
                                 }
                                 if ($payErrors) {
-                                    $message = "Счёт #$invoiceId создан и проведён, но не все оплаты записались (" . implode('; ', $payErrors) . ")." . $stockWarningText;
+                                    $message = "Счёт #$invoiceId создан и проведён, но не все оплаты записались (" . implode('; ', $payErrors) . ").";
+                                    if ($paidLabels) {
+                                        $message .= " Прошло и учтено: " . implode(' + ', $paidLabels)
+                                            . " — эти деньги записаны, доплату проведите через «Касса/Долги».";
+                                    }
+                                    if ($uzsErrors) $message .= "\nВНИМАНИЕ, сумовый счёт: " . implode('; ', $uzsErrors);
+                                    $message .= $stockWarningText;
                                     $messageType = 'err';
                                     // Счёт уже реальный — очищаем корзину, как и в остальных ветках,
                                     // иначе кассир мог бы случайно нажать "Оформить" ещё раз на ТЕ ЖЕ
@@ -349,9 +377,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     $_SESSION['cart'] = [];
                                     $_SESSION['sale_client'] = null;
                                 } else {
-                                    // Реальная сумма в сумах (карта/QR/перевод) — параллельной проводкой
-                                    // на единый сумовый счёт компании, независимо от списания долга в $.
-                                    $uzsErrors = postUzsLedger($api, $cfg, $payDetail, 'Продажа #' . $invoiceId . ', касса ' . $cfg['direction_label']);
+                                    // Сумовые проводки уже сделаны выше — сразу за каждой успешной
+                                    // оплатой (H5). Здесь только собираем предупреждения, если какая-то
+                                    // из них не прошла.
                                     $uzsWarning = $uzsErrors ? ("\nВНИМАНИЕ, сумовый счёт: " . implode('; ', $uzsErrors)) : '';
                                     $message = "Готово! Счёт #$invoiceId создан, оплачен: " . implode(' + ', $paidLabels) . "." . $stockWarningText . $uzsWarning;
                                     $messageType = ($stockWarnings || $uzsErrors) ? 'err' : 'ok';

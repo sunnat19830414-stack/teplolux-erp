@@ -270,6 +270,18 @@ class DolibarrApi
         return $this->put("thirdparties/{$id}", ['array_options' => $keyed]);
     }
 
+    // --- Сотрудники (контакты) контрагента, 11.09.2026 ---
+
+    /** Все сотрудники контрагента, включая ушедших (status 0). 404 «нет контактов» → пустой список. */
+    public function getThirdpartyContacts(int $socId): array
+    {
+        $r = $this->get('contacts?' . http_build_query(['thirdparty_ids' => $socId, 'limit' => 200, 'sortfield' => 't.lastname']));
+        return is_array($r) ? $r : [];
+    }
+    public function getContact(int $id) { return $this->get("contacts/{$id}"); }
+    public function createContact(array $data) { return $this->post('contacts', $data); }
+    public function updateContact(int $id, array $data) { return $this->put("contacts/{$id}", $data); }
+
     // --- Заказы поставщику ---
 
     /**
@@ -612,12 +624,23 @@ class DolibarrApi
         return $this->post('supplierinvoices', $data);
     }
 
-    /** Строка счёта БЕЗ товара (услуга/обобщённая позиция) — для предоплаты, где нет конкретного товара. */
-    public function addGenericSupplierInvoiceLine(int $invoiceId, string $label, float $priceHt): ?int
+    /**
+     * Строка счёта БЕЗ товара (услуга/обобщённая позиция) — для предоплаты, где нет конкретного товара.
+     *
+     * $currency — валюта счёта. Для НЕдолларового счёта базовую цену надо слать нулём, а сумму
+     * класть в multicurrency_subprice: Dolibarr сам выведет доллары по курсу счёта
+     * (`calcul_price_total()`, «pu calculation from pu_devise if pu empty»). Если передать одно
+     * число в оба поля, получится «1200 евро = 1200 долларов» — та же грабля, что ловилась
+     * 04.09.2026 на строках заказа. Раньше этот метод валюту не принимал вовсе, поэтому предоплата
+     * европейскому поставщику записывалась бы долларами.
+     */
+    public function addGenericSupplierInvoiceLine(int $invoiceId, string $label, float $priceHt, string $currency = 'USD'): ?int
     {
+        $isForeign = $currency !== '' && strtoupper($currency) !== 'USD';
         return $this->post("supplierinvoices/{$invoiceId}/lines", [
             'description' => $label,
-            'pu_ht' => $priceHt,
+            'pu_ht' => $isForeign ? 0 : $priceHt,
+            'multicurrency_subprice' => $isForeign ? $priceHt : 0,
             'tva_tx' => 0,
             'localtax1_tx' => 0,
             'localtax2_tx' => 0,
@@ -770,7 +793,7 @@ class DolibarrApi
         // multicurrency_code добавлен, чтобы отчёт по контракту мог показать валюту каждого заказа —
         // часть карточек поставщиков в EUR, и суммирование total_ttc "как есть" по заказам разных
         // валют без конвертации может вводить в заблуждение (см. отчёт аудита, "валюта в контрактах").
-        $q = http_build_query(['thirdparty_ids' => $socId, 'limit' => 500, 'properties' => 'id,ref,statut,total_ttc,date_commande,multicurrency_code']);
+        $q = http_build_query(['thirdparty_ids' => $socId, 'limit' => 500, 'properties' => 'id,ref,statut,total_ttc,date_commande,date_approve,date_valid,date_creation,multicurrency_code,multicurrency_total_ttc']);
         return $this->get('supplierorders?' . $q) ?? [];
     }
 

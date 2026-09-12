@@ -30,8 +30,24 @@ foreach ($m in $map) {
     }
 
     $dest = Join-Path $repo $m.To
-    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+
+    # The *.example.php templates exist ONLY in the repository, never on the server, and the copy
+    # below wipes the destination folder. Without this they would silently disappear from git.
+    # Found 10.09.2026 while adding the catalog_edit_price key to the kassa templates.
+    $keep = @()
+    if (Test-Path $dest) {
+        foreach ($f in Get-ChildItem $dest -Recurse -File -Filter '*.example.php') {
+            $keep += @{ Rel = $f.FullName.Substring($dest.Length).TrimStart(''); Text = [System.IO.File]::ReadAllBytes($f.FullName) }
+        }
+        Remove-Item $dest -Recurse -Force
+    }
     Copy-Item $m.From $dest -Recurse -Force
+    foreach ($k in $keep) {
+        $target = Join-Path $dest $k.Rel
+        $dir = Split-Path $target -Parent
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        [System.IO.File]::WriteAllBytes($target, $k.Text)
+    }
 
     foreach ($s in $secretFiles) {
         $p = Join-Path $dest $s
@@ -43,8 +59,11 @@ foreach ($m in $map) {
 }
 
 # Safety net: refuse to leave anything that looks like a live API key in the working tree.
-$leaks = Select-String -Path (Join-Path $repo 'custom\*') -Pattern '[0-9a-f]{32,}' `
-            -Include '*.php' -Recurse -ErrorAction SilentlyContinue
+# Select-String has no -Recurse in Windows PowerShell 5.1: the previous version of this check
+# threw a parameter error AFTER the copy, so the guard never actually ran (found 10.09.2026).
+# Enumerate the files first, then scan them.
+$phpFiles = Get-ChildItem (Join-Path $repo 'custom') -Recurse -File -Filter '*.php' -ErrorAction SilentlyContinue
+$leaks = if ($phpFiles) { $phpFiles | Select-String -Pattern '[0-9a-f]{32,}' -ErrorAction SilentlyContinue } else { $null }
 if ($leaks) {
     Write-Host ''
     Write-Warning 'Possible secrets found - review before committing:'

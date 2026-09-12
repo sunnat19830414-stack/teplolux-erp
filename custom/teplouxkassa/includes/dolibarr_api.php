@@ -262,7 +262,8 @@ class DolibarrApi
                     'qty' => $l['qty'],
                     'warehouse' => $l['warehouse'],
                     'price' => (float)($l['price'] ?? 0),
-                    'comment' => '',
+                    // пометка строки брака — видна в движении склада в Dolibarr (11.09.2026)
+                    'comment' => (string)($l['comment'] ?? ''),
                     'eatby' => '',
                     'sellby' => '',
                     'batch' => '',
@@ -271,6 +272,24 @@ class DolibarrApi
             }, $lines),
         ];
         return $this->post("supplierorders/{$orderId}/receive", $payload);
+    }
+
+    /**
+     * Прикрепить файл к заказу поставщику — тот же вызов, что в NodirTool (uploadOrderDocument).
+     * Используется для фото брака при приёмке (11.09.2026): фото лежат у заказа и видны закупщику
+     * на странице заказа в NodirTool и в самом Dolibarr. $orderRef — настоящий ref заказа, не id.
+     * Работает благодаря патчам ядра для modulepart supplier_order (см. patches/ в репозитории).
+     */
+    public function uploadOrderDocument(string $orderRef, string $filename, string $base64Content): ?string
+    {
+        return $this->post('documents/upload', [
+            'filename' => $filename,
+            'modulepart' => 'supplier_order',
+            'ref' => $orderRef,
+            'filecontent' => $base64Content,
+            'fileencoding' => 'base64',
+            'overwriteifexists' => 1,
+        ]);
     }
 
     /** Текущий остаток кассового/банковского счёта (например, наличные направления). */
@@ -521,11 +540,24 @@ class DolibarrApi
      * Dolibarr, не наша самодеятельность) — так связь видна и в самом интерфейсе Dolibarr, не только
      * в нашем приложении.
      */
-    public function createCreditNote(int $socId, ?int $sourceInvoiceId = null)
+    public function createCreditNote(int $socId, ?int $sourceInvoiceId = null, string $docKind = '')
     {
         $data = ['socid' => $socId, 'type' => 2];
         if ($sourceInvoiceId) $data['fk_facture_source'] = $sourceInvoiceId;
+        // M1 (финансовый аудит 05.09.2026): вид документа — отдельным полем. Аванс, выдача денег и
+        // возврат все являются кредит-нотами (type=2), и сменный отчёт различал их по СЛОВАМ в
+        // описании строки: кассир, написав в причине выдачи «Возврат аванса…», ломал классификацию.
+        if ($docKind !== '') $data['array_options'] = ['options_doc_kind' => $docKind];
         return $this->post('invoices', $data);
+    }
+
+    /**
+     * Вид документа, если он проставлен ('advance' | 'payout' | 'return'). Пусто у документов,
+     * созданных до 05.09.2026, — для них остаётся прежнее определение по содержимому.
+     */
+    public function getInvoiceDocKind(array $invoice): string
+    {
+        return (string)($invoice['array_options']['options_doc_kind'] ?? '');
     }
 
     /**

@@ -18,24 +18,8 @@
  */
 function nt_with_supplier_invoice_lock(int $invoiceId, callable $fn)
 {
-    $dbCfg = require __DIR__ . '/../config/db.local.php';
-    $db = new mysqli($dbCfg['host'], $dbCfg['user'], $dbCfg['pass'], $dbCfg['name']);
-    if ($db->connect_errno) {
-        return ['ok' => false, 'error' => 'Не удалось подключиться к БД для блокировки: ' . $db->connect_error];
-    }
-    $lockName = 'nodirtool_supplier_invoice_' . $invoiceId;
-    $escaped = $db->real_escape_string($lockName);
-    // Ждём лок до 10 сек — обычная оплата занимает доли секунды, 10 сек с запасом на случай, если
-    // соперничающий запрос сам чуть подвис (например, на медленном вызове Dolibarr API).
-    $res = $db->query("SELECT GET_LOCK('{$escaped}', 10) AS got");
-    $row = $res ? $res->fetch_assoc() : null;
-    if (!$row || (int)$row['got'] !== 1) {
-        return ['ok' => false, 'error' => 'Кто-то уже оплачивает этот счёт прямо сейчас — попробуйте через несколько секунд.'];
-    }
-    try {
-        return $fn();
-    } finally {
-        $db->query("SELECT RELEASE_LOCK('{$escaped}')");
-        $db->close();
-    }
+    // 05.09.2026: сама механика переехала в includes/named_lock.php — она понадобилась ещё в трёх
+    // местах (выдача денег, возврат по счёту, начисление зарплаты). Здесь остался только ключ.
+    require_once __DIR__ . '/named_lock.php';
+    return with_named_lock('nodirtool_supplier_invoice_' . $invoiceId, $fn);
 }

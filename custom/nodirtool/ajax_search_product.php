@@ -1,6 +1,8 @@
 <?php
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/product_lookup.php';
+require_once __DIR__ . '/includes/logistics.php';
+require_once __DIR__ . '/includes/sellable_stock.php';
 header('Content-Type: application/json; charset=utf-8');
 
 $term = trim($_GET['q'] ?? '');
@@ -32,7 +34,8 @@ foreach ($rows as $p) {
         'supplier_price' => $info === null ? null : $info['price'],
         'supplier_currency' => $info === null ? '' : $info['currency'],
         'supplier_native_price' => $info === null ? null : $info['native'],
-        'stock' => (float)($p['stock_reel'] ?? 0),
+        // годный остаток: REST отдаёт сумму по всем складам, включая брак (11.09.2026)
+        'stock' => nt_sellable_from_rest(logistics_db(), (array)$p),
         'incoming' => (float)($incoming[$id] ?? 0),
     ];
 }

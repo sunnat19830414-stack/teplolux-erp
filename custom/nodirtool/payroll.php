@@ -109,7 +109,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!$r['ok']) { $message = $r['error']; $messageType = 'err'; }
             else {
                 $msg = ($type === 'advance' ? 'Аванс выдан' : 'Зарплата выдана') . ': сотрудник получил '
-                    . number_format($r['received_usd'], 2) . ' $';
+                    . money($r['received_usd'], 'USD');
                 if ($r['tax_usd'] > 0.01) {
                     $msg .= ', со счёта списано ' . number_format($r['debited_usd'], 2) . ' $ (налог '
                         . number_format($r['tax_usd'], 2) . ' $)';
@@ -129,21 +129,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
             }
         }
-    } elseif ($action === 'add_department') {
-        $r = payroll_add_department($_POST['department_name'] ?? '');
-        flash_set($r['ok'] ? 'Отдел добавлен.' : $r['error'], $r['ok'] ? 'ok' : 'err');
-        header('Location: payroll.php?period=' . urlencode($period));
-        exit;
-    } elseif ($action === 'rename_department') {
-        $r = payroll_rename_department((int)($_POST['department_id'] ?? 0), $_POST['department_name'] ?? '');
-        flash_set($r['ok'] ? 'Название отдела изменено.' : $r['error'], $r['ok'] ? 'ok' : 'err');
-        header('Location: payroll.php?period=' . urlencode($period));
-        exit;
-    } elseif ($action === 'toggle_department') {
-        payroll_set_department_active((int)($_POST['department_id'] ?? 0), !empty($_POST['make_active']));
-        flash_set('Отдел обновлён.', 'ok');
-        header('Location: payroll.php?period=' . urlencode($period));
-        exit;
+    // Отделы с 06.09.2026 живут в отдельном разделе «Справочники → Отделы» (departments.php).
     } elseif ($action === 'adjust') {
         $id = (int)($_POST['employee_id'] ?? 0);
         $amount = (float)($_POST['adjust_amount'] ?? 0);
@@ -241,7 +227,7 @@ require __DIR__ . '/includes/layout_top.php';
             <td><?= number_format((float)$d['accrued'], 2) ?> $</td>
             <td><?= number_format((float)$d['advances'], 2) ?> $</td>
             <td><?= number_format((float)$d['payouts'], 2) ?> $</td>
-            <td class="muted"><?= (float)$d['tax'] > 0.01 ? number_format((float)$d['tax'], 2) . ' $' : '—' ?></td>
+            <td class="muted"><?= (float)$d['tax'] > 0.01 ? htmlspecialchars(money((float)$d['tax'], 'USD')) : '—' ?></td>
           </tr>
         <?php endforeach; ?>
       </table>
@@ -321,57 +307,12 @@ require __DIR__ . '/includes/layout_top.php';
   <?php endif; ?>
 </div>
 
-<?php // Управление отделами (04.09.2026) — Нодир заводит и правит сам, как категории у хозрасходов. ?>
 <div class="card">
   <h2>Отделы</h2>
-  <form method="post" class="row" style="align-items:end; margin-bottom:12px">
-    <?= csrf_field() ?>
-    <input type="hidden" name="action" value="add_department">
-    <div><label>Новый отдел</label>
-      <input type="text" name="department_name" placeholder="например: Склад Жоми · Склад Турк · Офис · Доставка"></div>
-    <div style="flex:0"><button type="submit" class="secondary">Добавить</button></div>
-  </form>
-  <?php if (empty($allDepartments)): ?>
-    <p class="muted">Пока нет ни одного отдела. Пока их нет, все сотрудники показываются одной группой
-    «Без отдела» — это нормально, отделы можно завести в любой момент.</p>
-  <?php else: ?>
-    <table>
-      <tr><th>Название</th><th>Сотрудников</th><th>Состояние</th><th></th></tr>
-      <?php foreach ($allDepartments as $d): ?>
-        <?php $cnt = $deptCounts[(int)$d['rowid']] ?? 0; ?>
-        <tr<?= $d['active'] ? '' : ' class="muted"' ?>>
-          <td>
-            <form method="post" style="display:flex; gap:6px; align-items:center">
-              <?= csrf_field() ?>
-              <input type="hidden" name="action" value="rename_department">
-              <input type="hidden" name="department_id" value="<?= (int)$d['rowid'] ?>">
-              <input type="text" name="department_name" value="<?= htmlspecialchars($d['name']) ?>" style="margin:0; max-width:240px">
-              <button type="submit" class="secondary small">Переименовать</button>
-            </form>
-          </td>
-          <td class="muted"><?= $cnt ?></td>
-          <td><?= $d['active'] ? '<span class="badge badge-ok">используется</span>' : '<span class="badge badge-neutral">скрыт</span>' ?></td>
-          <td>
-            <form method="post" style="display:inline"
-                  <?= ($d['active'] && $cnt > 0) ? 'onsubmit="return appConfirmSubmit(this, \'В этом отделе ' . $cnt . ' сотрудник(ов). Скрыть отдел? Люди останутся привязаны к нему, отдел просто пропадёт из выбора при заведении новых.\');"' : '' ?>>
-              <?= csrf_field() ?>
-              <input type="hidden" name="action" value="toggle_department">
-              <input type="hidden" name="department_id" value="<?= (int)$d['rowid'] ?>">
-              <?php if ($d['active']): ?>
-                <button type="submit" class="secondary small">Скрыть</button>
-              <?php else: ?>
-                <input type="hidden" name="make_active" value="1">
-                <button type="submit" class="secondary small">Вернуть</button>
-              <?php endif; ?>
-            </form>
-          </td>
-        </tr>
-      <?php endforeach; ?>
-    </table>
-    <p class="muted" style="margin-top:8px">Отдел указывается в карточке сотрудника. Скрытый отдел
-    пропадает из выбора для новых сотрудников, но у тех, кто уже в нём числится, привязка сохраняется —
-    и в списке, и в отчёте по отделам он продолжает показываться.</p>
-  <?php endif; ?>
+  <p class="muted">Список отделов живёт в разделе <a href="departments.php">Справочники → Отделы</a> —
+  там их заводят, переименовывают и скрывают.</p>
+  <p class="muted">Сейчас заведено: <strong><?= count($allDepartments) ?></strong>,
+  из них используется при выборе: <strong><?= count(array_filter($allDepartments, fn($d) => (int)$d['active'] === 1)) ?></strong>.</p>
 </div>
 <?php else: ?>
 
@@ -527,7 +468,7 @@ require __DIR__ . '/includes/layout_top.php';
               <div class="muted" style="font-size:12px"><?= number_format((float)$en['native_amount'], 0, '.', ' ') ?> сум по курсу <?= rtrim(rtrim(number_format((float)$en['rate'], 2, '.', ''), '0'), '.') ?></div>
             <?php endif; ?>
           </td>
-          <td class="muted"><?= (float)$en['tax_usd'] > 0.01 ? number_format((float)$en['tax_usd'], 2) . ' $' : '—' ?></td>
+          <td class="muted"><?= (float)$en['tax_usd'] > 0.01 ? htmlspecialchars(money((float)$en['tax_usd'], 'USD')) : '—' ?></td>
           <td class="muted"><?= htmlspecialchars($en['comment'] ?? '') ?></td>
           <td class="muted"><?= htmlspecialchars($en['who'] ?? '') ?></td>
         </tr>

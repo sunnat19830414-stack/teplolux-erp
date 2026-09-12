@@ -46,7 +46,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $flash = flash_get();
 if ($flash && $message === '') { $message = $flash['message']; $messageType = $flash['type']; }
 
-$open = request_list($dirs, ['draft', 'sent', 'taken']);
+// Черновики закупщиков (11.09.2026 они тоже составляют заявки в NodirTool) шефу не показываем — пока не отправлены
+$open = array_values(array_filter(request_list($dirs, ['draft', 'sent', 'taken']),
+                                  fn($r) => $r['status'] !== 'draft' || $r['created_by'] === $me['login']));
+$authorName = fn($login) => ['nodir' => 'Нодир', 'abdurashid' => 'Абдурашид', 'umid' => 'Умид', 'sunnatilla' => 'Суннатилла'][$login] ?? $login;
 $closed = request_list($dirs, ['ordered', 'declined', 'cancelled'], 40);
 $showHistory = !empty($_GET['history']);
 
@@ -99,7 +102,7 @@ require __DIR__ . '/includes/layout_top.php';
           <span class="muted">
             <?= htmlspecialchars($cfg['directions'][$r['direction']] ?? $r['direction']) ?>
             <?= $r['supplier_name'] ? ' · ' . htmlspecialchars($r['supplier_name']) : '' ?><br>
-            позиций: <?= (int)$r['line_count'] ?> · от <?= date('d.m.Y', strtotime($r['created_at'])) ?>
+            позиций: <?= (int)$r['line_count'] ?> · <?= htmlspecialchars($authorName($r['created_by'])) ?>, <?= date('d.m.Y', strtotime($r['created_at'])) ?>
             <?php if ($r['taken_by']): ?><br>в работе у: <?= htmlspecialchars($r['taken_by']) ?><?php endif; ?>
           </span>
         </a>

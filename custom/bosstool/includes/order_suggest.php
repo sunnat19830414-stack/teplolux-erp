@@ -17,6 +17,7 @@
  * оказалась бы занижена в шесть раз, и это молча, без единой ошибки на экране. Поэтому делим на
  * фактическую глубину данных (но не больше 12 месяцев) и подписываем её в интерфейсе.
  */
+require_once __DIR__ . '/sellable_stock.php';
 require_once __DIR__ . '/stock_lookup.php';
 
 /**
@@ -37,14 +38,83 @@ function sales_history_months(): float
     if ($cached !== null) return $cached;
 
     $db = stock_lookup_db();
+    // Самая ранняя продажа: сначала смотрим перенесённую из SAP историю, потом живые счета Dolibarr.
+    $starts = [];
+    $h = $db->query("SELECT MIN(period) mn FROM llx_nt_sales_history");
+    if ($h && ($row = $h->fetch_assoc()) && !empty($row['mn'])) $starts[] = strtotime($row['mn'] . '-01');
     $row = $db->query("SELECT MIN(datef) mn FROM llx_facture WHERE fk_statut > 0")->fetch_assoc();
-    if (empty($row['mn'])) return $cached = 0.5;
+    if (!empty($row['mn'])) $starts[] = strtotime((string)$row['mn']);
+    if (!$starts) return $cached = 0.5;
 
-    $days = (time() - strtotime((string)$row['mn'])) / 86400;
+    $days = (time() - min($starts)) / 86400;
     $months = $days / 30.44;
     if ($months < 0.5) $months = 0.5;
     if ($months > 12) $months = 12.0;
     return $cached = round($months, 2);
+}
+
+/**
+ * До какого месяца включительно история взята из SAP. Живые продажи Dolibarr считаем строго ПОСЛЕ
+ * этого месяца — иначе за пограничный период данные сложились бы дважды.
+ */
+function sales_history_last_period(): ?string
+{
+    static $cached = false;
+    if ($cached !== false) return $cached;
+    $r = stock_lookup_db()->query("SELECT MAX(period) mx FROM llx_nt_sales_history");
+    $row = $r ? $r->fetch_assoc() : null;
+    return $cached = (!empty($row['mx']) ? (string)$row['mx'] : null);
+}
+
+/**
+ * Откуда взяты продажи — одной фразой для экрана. Пользователь должен видеть, что цифра опирается
+ * на перенесённую из SAP историю, а не только на то, что успело накопиться в Dolibarr.
+ */
+function sales_history_note(): string
+{
+    $db = stock_lookup_db();
+    $r = $db->query("SELECT MIN(period) a, MAX(period) b, COUNT(DISTINCT fk_product) p FROM llx_nt_sales_history");
+    $h = $r ? $r->fetch_assoc() : null;
+    if (empty($h['a'])) return 'по продажам, накопленным в системе';
+
+    $fmt = function (string $ym) { $t = strtotime($ym . '-01'); return date('m.Y', $t); };
+    return 'по продажам с ' . $fmt($h['a']) . ' по ' . $fmt($h['b']) . ' — они перенесены из старой '
+         . 'системы SAP (' . (int)$h['p'] . ' товаров) — плюс всё, что продано в Dolibarr после';
+}
+
+/**
+ * Продано за последние $days дней по списку товаров: перенесённая из SAP история + живые продажи
+ * Dolibarr. Возвраты вычитаются в обоих источниках.
+ *
+ * @param string $list  уже проверенный список id через запятую
+ * @return array<int, float>  id товара => штук
+ */
+function sold_quantities(mysqli $db, string $list, int $days = 365): array
+{
+    $sold = [];
+    $fromPeriod = date('Y-m', strtotime("-$days days"));
+    $last = sales_history_last_period();
+
+    $h = $db->query("SELECT fk_product, SUM(qty_sold - qty_returned) qty
+                     FROM llx_nt_sales_history
+                     WHERE fk_product IN ($list) AND period >= '$fromPeriod'
+                     GROUP BY fk_product");
+    if ($h) while ($r = $h->fetch_assoc()) $sold[(int)$r['fk_product']] = (float)$r['qty'];
+
+    // Живые продажи — только за месяцы, которых нет в перенесённой истории.
+    $cut = $last !== null ? "AND f.datef > LAST_DAY('$last-01')" : '';
+    $res = $db->query(
+        "SELECT d.fk_product, SUM(CASE WHEN f.type = 2 THEN -d.qty ELSE d.qty END) AS qty
+         FROM llx_facturedet d
+         JOIN llx_facture f ON f.rowid = d.fk_facture
+         WHERE f.fk_statut > 0 AND d.fk_product IN ($list)
+           AND f.datef >= DATE_SUB(CURDATE(), INTERVAL $days DAY) $cut
+         GROUP BY d.fk_product"
+    );
+    if ($res) while ($r = $res->fetch_assoc())
+        $sold[(int)$r['fk_product']] = ($sold[(int)$r['fk_product']] ?? 0.0) + (float)$r['qty'];
+
+    return $sold;
 }
 
 /**
@@ -67,7 +137,8 @@ function supplier_order_suggestions(int $supplierId, array $directions, float $m
         $where[] = "e.kod_sap LIKE '" . $db->real_escape_string($directions[0]) . "%'";
     }
     $res = $db->query(
-        "SELECT p.rowid AS id, p.ref, p.label, p.stock, p.customcode, e.kod_sap
+        // годный остаток: брак не должен уменьшать рекомендацию к закупке (11.09.2026)
+        "SELECT p.rowid AS id, p.ref, p.label, " . nt_sellable_stock_sql($db, 'p') . " AS stock, p.customcode, e.kod_sap
          FROM llx_product p
          LEFT JOIN llx_product_extrafields e ON e.fk_object = p.rowid
          WHERE " . implode(' AND ', $where) . "
@@ -100,17 +171,8 @@ function supplier_order_suggestions(int $supplierId, array $directions, float $m
         $incoming[$pid]['refs'][] = (string)$r['ref'];
     }
 
-    // --- продажи за последние 365 дней (кредит-ноты вычитаются) ---
-    $sold = [];
-    $res = $db->query(
-        "SELECT d.fk_product, SUM(CASE WHEN f.type = 2 THEN -d.qty ELSE d.qty END) AS qty
-         FROM llx_facturedet d
-         JOIN llx_facture f ON f.rowid = d.fk_facture
-         WHERE f.fk_statut > 0 AND d.fk_product IN ($list)
-           AND f.datef >= DATE_SUB(CURDATE(), INTERVAL 365 DAY)
-         GROUP BY d.fk_product"
-    );
-    while ($r = $res->fetch_assoc()) $sold[(int)$r['fk_product']] = (float)$r['qty'];
+    // --- продажи за последние 365 дней: история из SAP + живые счета Dolibarr ---
+    $sold = sold_quantities($db, $list, 365);
 
     // --- заводские (закупочные) цены этого поставщика: по просьбе пользователя показываем их
     // руководству прямо в таблице, чтобы сразу было видно, во сколько обойдётся заявка ---

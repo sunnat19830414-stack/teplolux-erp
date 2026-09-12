@@ -17,6 +17,11 @@ $debts = report_client_debts($api, $dirs);
 $money = report_money($api, $cfg, $from, $to, $dirs);
 $purch = report_purchases($api, $from, $to);
 $supDebts = report_supplier_debts($api);
+// Долг поставщикам — по валютам (05.09.2026): складывать евро с долларами в одно число нельзя.
+$supDebtByCur = [];
+foreach ($supDebts as $byCur) {
+    foreach ($byCur as $cur => $sum) $supDebtByCur[$cur] = ($supDebtByCur[$cur] ?? 0) + $sum;
+}
 
 $myRequests = request_list($dirs, ['draft', 'sent', 'taken']);
 $lateTransit = array_values(array_filter($purch['transit_rows'],
@@ -36,7 +41,7 @@ require __DIR__ . '/includes/layout_top.php';
   <div class="kpi-grid">
     <div class="kpi"><div class="k">Продано за месяц</div><div class="v"><?= money($sales['net']) ?></div></div>
     <div class="kpi"><div class="k">Должны нам</div><div class="v neg"><?= money(array_sum($debts)) ?></div></div>
-    <div class="kpi"><div class="k">Должны мы</div><div class="v neg"><?= money(array_sum($supDebts)) ?></div></div>
+    <div class="kpi"><div class="k">Должны мы</div><div class="v neg"><?= htmlspecialchars(money_by_currency($supDebtByCur)) ?></div></div>
     <div class="kpi"><div class="k">Деньги: пришло − ушло</div>
       <?php // Только доллары — основная валюта компании. Смешивать их с сумами и евро в одной
             // цифре нельзя; полную картину по каждой валюте показывает отчёт «Пришло / ушло». ?>
@@ -51,6 +56,40 @@ require __DIR__ . '/includes/layout_top.php';
 
 <div class="grid-2col">
 <div>
+
+<?php
+  require_once __DIR__ . '/includes/cash_handover.php';
+  $hMine = (int)($_SESSION['user']['cash_account']['id'] ?? 0);
+  $hIn = $hMine ? handover_list([$hMine], [], ['pending']) : [];
+?>
+<?php if ($hIn): ?>
+<div class="card" style="border:2px solid #f59e0b">
+  <h2>Вам передали деньги — подтвердите</h2>
+  <?php foreach ($hIn as $h): ?>
+    <p style="margin:4px 0"><?= htmlspecialchars($h['from_who']) ?>: <strong><?= htmlspecialchars(money((float)$h['amount'], $h['currency'])) ?></strong>
+      <span class="muted">· <?= date('d.m H:i', strtotime($h['datec'])) ?></span></p>
+  <?php endforeach; ?>
+  <p style="margin-bottom:0"><a href="cash.php" class="btn small">Открыть «Моя касса»</a></p>
+</div>
+<?php endif; ?>
+<?php
+  require_once __DIR__ . '/includes/pricing.php';
+  pricing_ensure_table();
+  $npRows = pricing_db()->query("SELECT r.fk_order, c.ref, s.nom, COUNT(*) n,
+        SUM(p.pmp > 0 AND p.price <= p.pmp) below
+      FROM llx_nt_price_review r JOIN llx_product p ON p.rowid = r.fk_product
+      JOIN llx_commande_fournisseur c ON c.rowid = r.fk_order JOIN llx_societe s ON s.rowid = c.fk_soc
+      WHERE r.status = 'open' GROUP BY r.fk_order ORDER BY r.fk_order")->fetch_all(MYSQLI_ASSOC);
+?>
+<?php if ($npRows): ?>
+<div class="card" style="border-color:#f59e0b">
+  <h2>Новый приход — проверьте цены</h2>
+  <?php foreach ($npRows as $np): ?>
+    <p style="margin:4px 0"><a href="new_prices.php"><?= htmlspecialchars($np['nom']) ?> · <?= htmlspecialchars($np['ref']) ?></a>:
+      <?= (int)$np['n'] ?> товар(ов)<?php if ((int)$np['below']): ?> — <span class="err"><?= (int)$np['below'] ?> ниже себестоимости, касса их не продаёт</span><?php endif; ?></p>
+  <?php endforeach; ?>
+</div>
+<?php endif; ?>
 
 <div class="card">
   <h2>Мои заявки на закупку</h2>

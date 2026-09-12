@@ -29,6 +29,8 @@
 
   .content { flex: 1; min-width: 0; padding: 28px 32px; }
   .content-inner { max-width: 1180px; margin: 0 auto; }
+  /* Широкая раскладка для страниц-таблиц (заполнение карточек) — как в BossTool. */
+  .content-inner.wide { max-width: 1720px; }
 
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 18px; }
   /* UX-K4 (02.09.2026): модальное подтверждение вместо нативного confirm() — assets/confirm-modal.js */
@@ -57,6 +59,21 @@
   th { color: var(--muted); font-weight: 500; font-size: 12.5px; text-transform: uppercase; letter-spacing: .03em; }
   .muted { color: var(--muted); font-size: 13px; }
   .ok { color: var(--ok); font-weight: 600; }
+  /* Таблица позиций заказа (assets/line_table.js, 11.09.2026) */
+  .nt-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+  .nt-sortable::after { content: ' ↕'; color: var(--muted); font-size: 11px; }
+  .nt-sortable[data-dir="asc"]::after { content: ' ▲'; color: var(--accent); }
+  .nt-sortable[data-dir="desc"]::after { content: ' ▼'; color: var(--accent); }
+  table.nt-lines input.nt-edit { width: 96px; margin: 0; padding: 6px 8px; font-size: 14px; }
+  table.nt-lines td { vertical-align: middle; }
+  tr.nt-noprice td { background: var(--danger-bg); }
+  tr.nt-saved td { background: #dcfce7; }
+  tr.nt-failed td { background: var(--danger-bg); }
+  .nt-toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); display: none; gap: 12px;
+    align-items: center; background: #1f2430; color: #fff; padding: 10px 16px; border-radius: 10px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.25); z-index: 1000; font-size: 14px; max-width: 90vw; }
+  .nt-toast .err { color: #fca5a5; }
+  .nt-toast button { padding: 6px 12px; }
   .err { color: var(--danger); font-weight: 600; }
   .warn { color: var(--warn); font-weight: 600; background: var(--warn-bg); padding: 8px 12px; border-radius: 8px; display: inline-block; }
 
@@ -95,40 +112,73 @@
   <aside class="sidebar">
     <div class="sidebar-brand">Теплолюкс<span>Закупки</span></div>
     <nav>
+      <?php
+        // Счётчики в меню: новая заявка от шефа и открытая рекламация не должны пролежать
+        // незамеченными — раньше и то и другое приходило в переписку и терялось там.
+        require_once __DIR__ . '/requests.php';
+        require_once __DIR__ . '/claims.php';
+        $__waiting = requests_waiting_count();
+        $__openClaims = count(claims_list(true));
+        // Активный пункт: вторым аргументом — вспомогательные страницы того же раздела.
+        $__nav = function (string $file, string $title, array $also = [], string $badge = '') use ($__page) {
+            $active = $__page === $file || in_array($__page, $also, true);
+            echo '<a href="' . $file . '"' . ($active ? ' class="active"' : '') . '>'
+               . htmlspecialchars($title) . $badge . '</a>';
+        };
+        $__badge = fn(int $n) => $n > 0 ? ' <span class="badge badge-warn">' . $n . '</span>' : '';
+      ?>
+
       <div class="nav-group-title">Главная</div>
-      <a href="index.php" class="<?= $__page === 'index.php' ? 'active' : '' ?>">Сводка</a>
+      <?php $__nav('index.php', 'Сводка'); ?>
+
       <div class="nav-group-title">Закупки</div>
       <?php
-        // Заявки от руководства (04.09.2026): счётчик прямо в меню, чтобы новый список от шефа не
-        // пролежал незамеченным — раньше он приходил в чат и терялся там.
-        require_once __DIR__ . '/requests.php';
-        $__waiting = requests_waiting_count();
+        $__nav('requests.php', 'Заявки на закупку', ['request_view.php']);
+        $__nav('requests_in.php', 'Заявки к оформлению', [], $__badge($__waiting));
+        $__nav('orders.php', 'Заказы поставщику', ['order_view.php', 'product_form.php', 'price_history_view.php']);
+        $__nav('suppliers.php', 'Поставщики / контракты', ['supplier_form.php']);
+        $__nav('catalog.php', 'Каталог товаров', ['product_card.php']);
+        $__nav('claims.php', 'Рекламации', [], $__badge($__openClaims));
       ?>
-      <a href="requests_in.php" class="<?= $__page === 'requests_in.php' ? 'active' : '' ?>">Заявки от руководства<?php
-        if ($__waiting > 0) echo ' <span class="badge badge-warn">' . $__waiting . '</span>'; ?></a>
-      <a href="orders.php" class="<?= $__page === 'orders.php' ? 'active' : '' ?>">Заказы поставщику</a>
-      <a href="logistics.php" class="<?= $__page === 'logistics.php' ? 'active' : '' ?>">Логистика</a>
-      <a href="suppliers.php" class="<?= $__page === 'suppliers.php' ? 'active' : '' ?>">Поставщики / контракты</a>
-      <a href="carriers.php" class="<?= $__page === 'carriers.php' ? 'active' : '' ?>">Перевозчики</a>
-      <a href="batches.php" class="<?= $__page === 'batches.php' ? 'active' : '' ?>">Партии / Логистика</a>
-      <a href="cost_report.php" class="<?= $__page === 'cost_report.php' ? 'active' : '' ?>">Себестоимость по товарам</a>
+
+      <div class="nav-group-title">Логистика</div>
+      <?php
+        $__nav('logistics.php', 'Заказы в пути');
+        $__nav('shipments.php', 'Перевозки');
+        $__nav('carriers.php', 'Перевозчики', ['carrier_form.php']);
+        $__nav('batches.php', 'Партии и расходы');
+        $__nav('cost_report.php', 'Себестоимость по товарам');
+      ?>
+
       <div class="nav-group-title">Финансы</div>
-      <a href="mycash.php" class="<?= $__page === 'mycash.php' ? 'active' : '' ?>">Моя касса</a>
-      <a href="payments.php" class="<?= $__page === 'payments.php' ? 'active' : '' ?>">Оплата поставщикам</a>
-      <a href="convert.php" class="<?= $__page === 'convert.php' ? 'active' : '' ?>">Конвертация валют</a>
-      <?php // 04.09.2026: зарплата — только у Нодира (см. page_access в config.php). Пункт меню скрыт
-            // у остальных, но настоящая защита стоит в auth.php — по прямой ссылке тоже не зайти. ?>
-      <?php if (nt_page_allowed($cfg, 'payroll.php')): ?>
-        <a href="payroll.php" class="<?= $__page === 'payroll.php' || $__page === 'employee_form.php' ? 'active' : '' ?>">Зарплата и авансы</a>
-      <?php endif; ?>
-      <a href="household.php" class="<?= $__page === 'household.php' ? 'active' : '' ?>">Хозрасходы</a>
-      <a href="income.php" class="<?= $__page === 'income.php' ? 'active' : '' ?>">Доходы</a>
+      <?php
+        $__nav('mycash.php', 'Моя касса');
+        $__nav('payments.php', 'Оплата поставщикам');
+        $__nav('convert.php', 'Конвертация валют');
+        // Зарплата — только у Нодира (page_access в config.php). Пункт скрыт у остальных, но
+        // настоящая защита стоит в auth.php: по прямой ссылке тоже не зайти.
+        if (nt_page_allowed($cfg, 'payroll.php')) $__nav('payroll.php', 'Зарплата и авансы', ['employee_form.php']);
+        $__nav('household.php', 'Хозрасходы');
+        $__nav('income.php', 'Доходы');
+      ?>
+
+      <div class="nav-group-title">Справочники</div>
+      <?php
+        $__nav('expense_types.php', 'Виды логистических расходов');
+        $__nav('expense_categories.php', 'Категории хозрасходов');
+        $__nav('income_sources.php', 'Источники доходов');
+        if (nt_page_allowed($cfg, 'departments.php')) $__nav('departments.php', 'Отделы');
+      ?>
+
       <div class="nav-group-title">Настройки</div>
-      <a href="mail_setup.php" class="<?= $__page === 'mail_setup.php' ? 'active' : '' ?>">Настройка почты</a>
+      <?php
+        $__nav('mail_setup.php', 'Настройка почты');
+        $__nav('suppliers_bulk.php', 'Заполнить карточки поставщиков');
+      ?>
     </nav>
     <div class="sidebar-footer">
       <div>Вы: <?= htmlspecialchars($_SESSION['user']['name'] ?? '') ?></div>
       <a href="logout.php">Выход</a>
     </div>
   </aside>
-  <main class="content"><div class="content-inner">
+  <main class="content"><div class="content-inner<?= !empty($wideLayout) ? ' wide' : '' ?>">

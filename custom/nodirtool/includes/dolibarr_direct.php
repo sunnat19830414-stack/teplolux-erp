@@ -129,3 +129,27 @@ function dolibarr_delete_line(int $orderId, int $lineId): array
     }
     return ['ok' => true];
 }
+
+/**
+ * Удалить черновик заказа целиком (11.09.2026). Через REST не получалось: у api_purchasing нет права
+ * «удалять заказы поставщику», и Dolibarr отвечал 403 — Абдурашид: «удалить весь черновик не
+ * получается». Право не расширяем (через REST оно дало бы удалять заказ в любом статусе), удаляем
+ * классом Dolibarr — так же, как уже правятся и удаляются строки. Только черновик.
+ */
+function dolibarr_delete_draft(int $orderId): array
+{
+    global $db;
+    $user = dolibarr_direct_user();
+    $order = new CommandeFournisseur($db);
+    if ($order->fetch($orderId) <= 0) {
+        return ['ok' => false, 'error' => 'Заказ не найден.'];
+    }
+    if ((int)$order->status !== 0) {
+        return ['ok' => false, 'error' => 'Удалить целиком можно только черновик.'];
+    }
+    if ($order->delete($user) < 0) {
+        $err = $order->error ?: (is_array($order->errors) ? implode('; ', $order->errors) : 'неизвестная ошибка');
+        return ['ok' => false, 'error' => 'Ошибка удаления: ' . $err];
+    }
+    return ['ok' => true];
+}

@@ -169,6 +169,7 @@ function buildClientHistory(DolibarrApi $api, int $socid, array $filters = []): 
                 'date' => $dateRaw ? date('d.m.Y', $dateRaw) : '',
                 'doc_type' => $docType,
                 'type_label' => $typeLabels[$docType],
+                'doc_id' => (int)($inv['id'] ?? 0),   // для ссылки на выгрузку в Excel
                 'doc_ref' => $inv['ref'] ?? '',
                 // При активном фильтре по товару/категории/складу сумма документа — это сумма ТОЛЬКО
                 // отфильтрованных строк (а не полная сумма счёта), иначе цифры не совпадали бы визуально.

@@ -7,14 +7,32 @@
  */
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/mycash.php';
+require_once __DIR__ . '/includes/cash_handover.php';
 
 $myAcc = $cfg['personal_cash_accounts'][$_SESSION['user']['login']] ?? null;
+
+// Валюта личной кассы — из самой карточки счёта, не угадывается по названию (05.09.2026).
+// Определяется ДО обработки POST: сообщения об ошибках там уже показывают суммы.
+require_once __DIR__ . '/includes/currency.php';
+$accountCurrency = $myAcc ? account_currency((int)$myAcc['id']) : 'USD';
 
 $message = '';
 $messageType = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $myAcc) {
     $action = $_POST['action'] ?? '';
+    $ntUserId = defined('LOGISTICS_API_USER_ID') ? LOGISTICS_API_USER_ID : 4;
+    // Передачи с подтверждением (11.09.2026, includes/cash_handover.php)
+    if ($action === 'handover_confirm') {
+        $r = handover_confirm((int)($_POST['handover_id'] ?? 0), [(int)$myAcc['id']], (string)($_SESSION['user']['name'] ?? ''), $ntUserId);
+        if (!empty($r['ok'])) mycash_confirm_line((int)$r['bank_id'], (int)$myAcc['id'], $_SESSION['user']['login']);  // квитанция уже есть — это и есть подтверждение
+        flash_set($r['ok'] ? ($r['warning'] ?? '') . 'Принято: ' . money($r['amount'], $r['currency']) . ' от ' . $r['from_who'] . ' — зачислено в вашу кассу.' : $r['error'],
+                  $r['ok'] ? (!empty($r['warning']) ? 'warn' : 'ok') : 'err');
+        header('Location: mycash.php');
+        exit;
+    }
+    $hr = handover_handle_post($_POST, [(int)$myAcc['id']], (string)($_SESSION['user']['name'] ?? ''), $ntUserId, fn($a, $c) => money($a, $c));
+    if ($hr) { flash_set($hr[0], $hr[1]); header('Location: mycash.php'); exit; }
     if ($action === 'confirm_receipt') {
         $lineId = (int)($_POST['line_id'] ?? 0);
         if ($lineId) {
@@ -52,22 +70,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $myAcc) {
             $message = 'Укажите сумму передачи.';
             $messageType = 'err';
         } elseif ($currentBalance !== null && $amount > $currentBalance + 0.001) {
-            $message = 'В кассе только ' . number_format((float)$currentBalance, 2) . ' $ — передать больше нельзя.';
+            $message = 'В кассе только ' . money((float)$currentBalance, $accountCurrency) . ' — передать больше нельзя.';
             $messageType = 'err';
         } else {
-            $label = 'Передача шефу (Умид) — от: ' . $who;
-            $outRes = $api->addBankLine((int)$myAcc['id'], $label, -1 * $amount, 'LIQ');
-            if ($outRes === null) {
-                $message = 'Не удалось списать с вашей кассы: ' . $api->lastError . ' — передача не записана.';
+            // С подтверждением шефа (11.09.2026): деньги спишутся с вашей кассы, когда Умид нажмёт «Принял».
+            $r = handover_create((int)$myAcc['id'], (string)$myAcc['label'], (int)$bossAcc['id'], (string)$bossAcc['label'],
+                                 $amount, (string)$who, trim($_POST['comment'] ?? ''));
+            if (empty($r['ok'])) {
+                $message = 'Передача не создана: ' . $r['error'];
                 $messageType = 'err';
             } else {
-                $inRes = $api->addBankLine((int)$bossAcc['id'], 'Принято от: ' . $who, $amount, 'LIQ');
-                $msg = 'Передано шефу: ' . number_format($amount, 2) . ' $.';
-                if ($inRes === null) {
-                    $msg .= ' ВНИМАНИЕ: с вашей кассы списано, но на кассу шефа НЕ зачислено ('
-                        . $api->lastError . ') — сообщите Суннату, поправим вручную.';
-                }
-                flash_set($msg, $inRes === null ? 'err' : 'ok');
+                flash_set('Передача шефу ' . money($r['amount'], $r['currency']) . ' ждёт его подтверждения. Из вашей кассы сумма спишется, когда он подтвердит.', 'ok');
                 header('Location: mycash.php');
                 exit;
             }
@@ -90,6 +103,9 @@ if ($myAcc) {
     // Свежие сверху — API отдаёт по возрастанию rowid.
     $lines = array_reverse($lines);
     $ackMap = mycash_get_ack_map((int)$myAcc['id']);
+    $pendingOut = handover_pending_out((int)$myAcc['id']);
+    $hIn = handover_list([(int)$myAcc['id']], [], ['pending']);
+    $hOut = handover_list([], [(int)$myAcc['id']], ['pending', 'rejected', 'confirmed'], 10);
 }
 
 require __DIR__ . '/includes/layout_top.php';
@@ -100,28 +116,34 @@ require __DIR__ . '/includes/layout_top.php';
   <p class="err">Для вашего логина не настроен личный кассовый счёт — обратитесь к администратору.</p>
 <?php else: ?>
 <p class="muted">
-  Наличные, которые вам передал Жамшид/MuhammadAli через "Передать кассу" в мини-кассе, зачисляются сюда
-  сразу и по-настоящему. Оплата поставщику наличными из этой суммы — на странице
+  Наличные, которые вам передают (касса Жамшида, шеф), зачисляются сюда, когда вы нажмёте «Принял» в блоке
+  «Ждут вашего подтверждения». Оплата поставщику наличными из этой суммы — на странице
   «<a href="payments.php">Оплата поставщикам</a>» (способ списания «Моя касса»).
 </p>
 <?php if ($message): ?><p class="<?= $messageType ?>"><?= nl2br(htmlspecialchars($message)) ?></p><?php endif; ?>
+
+<?= handover_render($hIn ?? [], $hOut ?? [], csrf_field(), fn($a, $c) => money($a, $c)) ?>
 
 <div class="card">
   <div class="row" style="align-items:center">
     <div>
       <h2 style="margin:0"><?= htmlspecialchars($myAcc['label']) ?></h2>
-      <div style="font-size:28px; font-weight:700"><?= $balance !== null ? number_format($balance, 2) . ' $' : '?' ?></div>
+      <div style="font-size:28px; font-weight:700"><?= $balance !== null ? htmlspecialchars(money($balance, $accountCurrency)) : '?' ?></div>
+      <?php if (!empty($pendingOut) && $pendingOut > 0.004): ?>
+        <div class="muted">из них <?= htmlspecialchars(money($pendingOut, $accountCurrency)) ?> передано шефу и ждёт подтверждения</div>
+      <?php endif; ?>
     </div>
     <?php // Передача остатка шефу (04.09.2026) — деньги у вас копятся, а потом уходят Умиду. ?>
-    <?php if (!empty($cfg['boss_cash_account']) && $balance !== null && $balance > 0.01): ?>
+    <?php $availH = $balance !== null ? (float)$balance - ($pendingOut ?? 0) : 0; ?>
+    <?php if (!empty($cfg['boss_cash_account']) && $balance !== null && $availH > 0.01): ?>
       <form method="post" style="flex:0; display:flex; gap:8px; align-items:end"
-            onsubmit="return appConfirmSubmit(this, 'Передать деньги шефу? Сумма спишется с вашей кассы и зачислится на кассу Умида.');">
+            onsubmit="return appConfirmSubmit(this, 'Передать деньги шефу? Сумма спишется с вашей кассы, когда Умид подтвердит, что принял.');">
         <?= csrf_field() ?>
         <input type="hidden" name="action" value="handover_to_boss">
         <div>
           <label>Передать шефу, $</label>
-          <input type="number" step="0.01" min="0.01" max="<?= number_format((float)$balance, 2, '.', '') ?>"
-                 name="amount" value="<?= number_format((float)$balance, 2, '.', '') ?>" style="margin:0; min-width:130px">
+          <input type="number" step="0.01" min="0.01" max="<?= number_format($availH, 2, '.', '') ?>"
+                 name="amount" value="<?= number_format($availH, 2, '.', '') ?>" style="margin:0; min-width:130px">
         </div>
         <button type="submit">Передать шефу</button>
       </form>
@@ -143,7 +165,7 @@ require __DIR__ . '/includes/layout_top.php';
       ?>
         <tr>
           <td><?= $l['dateo'] ? date('d.m.Y', (int)$l['dateo']) : '' ?></td>
-          <td class="<?= $amount >= 0 ? 'ok' : 'err' ?>"><?= ($amount >= 0 ? '+' : '') . number_format($amount, 2) ?> $</td>
+          <td class="<?= $amount >= 0 ? 'ok' : 'err' ?>"><?= ($amount >= 0 ? '+' : '') . htmlspecialchars(money($amount, $accountCurrency)) ?></td>
           <td><?= htmlspecialchars($l['label'] ?? '') ?></td>
           <td>
             <?php if ($amount > 0): ?>

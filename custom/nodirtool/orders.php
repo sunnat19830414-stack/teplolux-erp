@@ -28,6 +28,25 @@ if (!empty($_SESSION['po_new_product'])) {
 $message = '';
 $messageType = '';
 
+// Правки корзины без перезагрузки (assets/line_table.js, 11.09.2026) — запрос с ajax=1 получает JSON.
+$isAjax = !empty($_POST['ajax']);
+function po_cart_json(array $r): void
+{
+    $cur = $_SESSION['po_supplier']['currency'] ?? 'USD';
+    $rate = (float)($_SESSION['po_supplier']['rate'] ?? 1);
+    $total = 0.0;
+    foreach ($_SESSION['po_cart'] as $it) $total += (float)$it['price'] * (float)$it['qty'];
+    $r['totals'] = [
+        'main' => number_format($total, 2) . ' ' . currency_label($cur),
+        'sub' => $cur !== 'USD' ? '≈ ' . number_format(to_base_currency($total, $cur, $rate), 2) . ' $ по курсу '
+                                  . rtrim(rtrim(number_format($rate, 4, '.', ''), '0'), '.') : '',
+        'count' => count($_SESSION['po_cart']),
+    ];
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($r, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
@@ -62,19 +81,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'ref' => $_POST['ref'] ?? '',
             'label' => $_POST['label'] ?? '',
             'price' => (float)($_POST['price'] ?? 0),
-            'qty' => 1,
+            'qty' => max((float)($_POST['qty'] ?? 1), 0.001),   // qty — только при «Вернуть» удалённую позицию
         ];
+        if ($isAjax) po_cart_json(['ok' => true, 'key' => array_key_last($_SESSION['po_cart'])]);
     } elseif ($action === 'update_cart_item') {
-        $idx = (int)($_POST['idx'] ?? -1);
-        if (isset($_SESSION['po_cart'][$idx])) {
-            $qty = (float)($_POST['qty'] ?? 0);
-            $price = (float)($_POST['price'] ?? 0);
-            if ($qty > 0) $_SESSION['po_cart'][$idx]['qty'] = $qty;
-            if ($price >= 0) $_SESSION['po_cart'][$idx]['price'] = $price;
+        $idx = (int)($_POST['idx'] ?? $_POST['key'] ?? -1);
+        if (!isset($_SESSION['po_cart'][$idx])) {
+            if ($isAjax) po_cart_json(['ok' => false, 'error' => 'Позиции уже нет в корзине — обновите страницу.']);
+        } else {
+            // 11.09.2026: меняем только то, что пришло. Раньше форма количества не передавала цену, а
+            // отсутствующая цена читалась как 0 — смена количества в корзине ОБНУЛЯЛА цену позиции.
+            if (isset($_POST['qty']) && (float)$_POST['qty'] > 0) $_SESSION['po_cart'][$idx]['qty'] = (float)$_POST['qty'];
+            if (isset($_POST['price']) && $_POST['price'] !== '' && (float)$_POST['price'] >= 0) $_SESSION['po_cart'][$idx]['price'] = (float)$_POST['price'];
+            $it = $_SESSION['po_cart'][$idx];
+            if ($isAjax) po_cart_json(['ok' => true, 'qty' => (float)$it['qty'], 'price' => (float)$it['price'],
+                'line_total_raw' => round($it['qty'] * $it['price'], 2),
+                'line_total' => number_format($it['qty'] * $it['price'], 2) . ' ' . currency_label($_SESSION['po_supplier']['currency'] ?? 'USD')]);
         }
+        $_SESSION['_preserve_once']['po_supplier'] = true;
+        header('Location: orders.php#cart-' . $idx);
+        exit;
     } elseif ($action === 'remove_from_cart') {
-        $idx = (int)($_POST['idx'] ?? -1);
-        if (isset($_SESSION['po_cart'][$idx])) unset($_SESSION['po_cart'][$idx]);
+        $keys = isset($_POST['keys']) ? array_map('intval', (array)$_POST['keys']) : [(int)($_POST['idx'] ?? -1)];
+        $deleted = [];
+        foreach ($keys as $k) if (isset($_SESSION['po_cart'][$k])) { unset($_SESSION['po_cart'][$k]); $deleted[] = $k; }
+        if ($isAjax) po_cart_json(['ok' => true, 'deleted' => $deleted]);
+        $_SESSION['_preserve_once']['po_supplier'] = true;
+        header('Location: orders.php');
+        exit;
     } elseif ($action === 'create_order') {
         $currency = $_SESSION['po_supplier']['currency'] ?? 'USD';
         [$rate, $rateErr] = validate_currency_rate($currency, $_SESSION['po_supplier']['rate'] ?? 1);
@@ -142,14 +176,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $who = $_SESSION['user']['name'] ?? '';
         $result = null;
         $label = '';
+        // Цена-заглушка (0,01) не должна уйти дальше черновика (11.09.2026). В справочнике 784 товара
+        // с закупочной ценой 0,01 USD, и при оформлении заказа она подставляется сама. Если такой
+        // заказ примут на склад, Dolibarr пересчитает себестоимость по 0,01 — затрёт настоящую,
+        // а весь фрахт (он делится пропорционально стоимости строк) ляжет на остальные позиции.
+        // Проводить черновик можно — утвердить и отправить нельзя, пока цены не исправлены.
+        if (in_array($action, ['approve_order', 'send_order'], true)) {
+            $chk = $api->getSupplierOrder($orderId);
+            $stub = [];
+            foreach ((array)($chk['lines'] ?? []) as $ln) {
+                if ((float)($ln['subprice'] ?? 0) <= 0.011) $stub[] = ($ln['ref'] ?? $ln['product_ref'] ?? '') . ' ' . mb_substr((string)($ln['product_label'] ?? $ln['label'] ?? ''), 0, 40);
+            }
+            if ($stub) {
+                flash_set('Заказ #' . $orderId . ' не ' . ($action === 'approve_order' ? 'утверждён' : 'отправлен') .
+                    ': у ' . count($stub) . ' позиц. цена не указана (0,01 — заглушка). Откройте заказ, «Изменить заказ» и впишите цену из спецификации поставщика: ' .
+                    implode('; ', array_slice($stub, 0, 6)) . (count($stub) > 6 ? ' …' : ''), 'err');
+                header('Location: orders.php');
+                exit;
+            }
+        }
         if ($action === 'validate_order') { $result = $api->validateSupplierOrder($orderId); $label = 'проведён'; }
         elseif ($action === 'approve_order') { $result = $api->approveSupplierOrder($orderId); $label = 'утверждён'; }
         elseif ($action === 'send_order') { $result = $api->sendSupplierOrder($orderId); $label = 'отправлен поставщику'; }
+        // Дата готовности у поставщика (12.09.2026): дата отправки + «типичный срок поставки» из карточки.
+        $readyNote = '';
+        if ($action === 'send_order' && $result !== null) {
+            require_once __DIR__ . '/includes/order_dates.php';
+            $ord = $api->getSupplierOrder($orderId);
+            $rd = is_array($ord) ? order_fill_ready_date_on_send($orderId, (int)($ord['socid'] ?? 0)) : '';
+            $readyNote = $rd !== ''
+                ? ' Поставщик должен закончить к ' . date('d.m.Y', strtotime($rd))
+                  . ' (срок из его карточки). За неделю до этого напомним оформить перевозку; дату можно поправить в «Заказах в пути».'
+                : '';
+        }
         if ($result === null) {
             $message = "Ошибка ($action) по заказу #$orderId: " . $api->lastError;
             $messageType = 'err';
         } else {
-            $message = "Заказ #$orderId $label ($who).";
+            $message = "Заказ #$orderId $label ($who)." . ($readyNote ?? '');
             $messageType = 'ok';
             // Статус заказа уже реально изменён — редирект (POST → GET), та же причина, что и выше.
             flash_set($message, $messageType);
@@ -310,62 +374,56 @@ require __DIR__ . '/includes/layout_top.php';
   <?php if (empty($_SESSION['po_cart'])): ?>
     <p class="muted">Пусто</p>
   <?php else: ?>
-    <table>
-      <tr><th>Товар</th><th>Кол-во</th><th>Цена, <?= htmlspecialchars($poCurLabel) ?></th><th></th></tr>
-      <?php foreach ($_SESSION['po_cart'] as $idx => $item): ?>
-        <tr>
-          <td><?= htmlspecialchars($item['label']) ?><div class="muted"><?= htmlspecialchars($item['ref']) ?></div></td>
-          <td>
-            <form method="post" style="display:flex; gap:4px">
-  <?= csrf_field() ?>
-              <input type="hidden" name="action" value="update_cart_item">
-              <input type="hidden" name="idx" value="<?= $idx ?>">
-              <input type="number" name="qty" value="<?= htmlspecialchars($item['qty']) ?>" step="any" min="0.001" style="width:70px; margin:0" onchange="this.form.submit()">
-            </form>
-          </td>
-          <td>
-            <form method="post" style="display:flex; gap:4px">
-  <?= csrf_field() ?>
-              <input type="hidden" name="action" value="update_cart_item">
-              <input type="hidden" name="idx" value="<?= $idx ?>">
-              <input type="number" name="price" value="<?= htmlspecialchars($item['price']) ?>" step="0.01" min="0" style="width:80px; margin:0" onchange="this.form.submit()">
-            </form>
-            <?php
-              // Справочная цена от поставщика — чтобы было видно, откуда взялась цифра и не
-              // разошлась ли она с прайсом после ручной правки.
-              $ref = $cartRefPrices[(int)$item['product_id']] ?? null;
-            ?>
-            <div class="muted" style="font-size:11.5px; margin-top:2px">
-              <?php if ($ref !== null && $ref > 0): ?>
-                <?php if (abs($ref - (float)$item['price']) < 0.0001): ?>
-                  из прайса
-                <?php else: ?>
-                  в прайсе: <?= rtrim(rtrim(number_format($ref, 4, '.', ''), '0'), '.') ?>
-                <?php endif; ?>
-              <?php else: ?>
-                <?php // Цены от этого поставщика в справочнике нет вовсе — говорим об этом и тогда,
-                      // когда закупщик уже вписал свою: иначе непонятно, сверял её кто-то или нет. ?>
-                нет в прайсе
-              <?php endif; ?>
-            </div>
-          </td>
-          <td>
-            <form method="post">
-  <?= csrf_field() ?>
-              <input type="hidden" name="action" value="remove_from_cart">
-              <input type="hidden" name="idx" value="<?= $idx ?>">
-              <button type="submit" class="secondary small">✕</button>
-            </form>
-          </td>
+    <div class="row" style="align-items:center; margin-bottom:6px">
+      <p class="muted" style="margin:0">Правки сохраняются сами. Щёлкните заголовок, чтобы отсортировать.</p>
+      <div style="flex:0"><button type="button" class="danger small" id="cartBulkDel" style="display:none; white-space:nowrap">Удалить отмеченные</button></div>
+    </div>
+    <div style="overflow-x:auto">
+    <table class="nt-lines" id="cartLines">
+      <thead><tr><th style="width:28px"><input type="checkbox" class="nt-check-all" title="Отметить все" style="width:auto"></th>
+        <th data-sort="ref">Артикул</th><th data-sort="name">Наименование</th><th data-sort="qty">Кол-во</th>
+        <th data-sort="price">Цена, <?= htmlspecialchars($poCurLabel) ?></th><th data-sort="sum">Сумма</th><th></th></tr></thead>
+      <tbody>
+      <?php foreach ($_SESSION['po_cart'] as $idx => $item):
+        // Справочная цена от поставщика — чтобы было видно, откуда взялась цифра и не разошлась ли
+        // она с прайсом после ручной правки. Пусто — цены от этого поставщика в справочнике нет.
+        $refp = $cartRefPrices[(int)$item['product_id']] ?? null;
+        $refAttr = ($refp !== null && $refp > 0) ? rtrim(rtrim(number_format($refp, 4, '.', ''), '0'), '.') : '';
+        $q = (float)$item['qty']; $pr = (float)$item['price'];
+      ?>
+        <tr id="cart-<?= $idx ?>" data-key="<?= $idx ?>" data-product="<?= (int)$item['product_id'] ?>"
+            data-ref="<?= htmlspecialchars($item['ref']) ?>" data-name="<?= htmlspecialchars($item['label']) ?>" data-desc="<?= htmlspecialchars($item['label']) ?>"
+            data-qty="<?= $q ?>" data-price="<?= $pr ?>" data-sum="<?= round($q * $pr, 2) ?>" data-refprice="<?= $refAttr ?>">
+          <td><input type="checkbox" class="nt-check" style="width:auto"></td>
+          <td style="white-space:nowrap"><?= htmlspecialchars($item['ref']) ?></td>
+          <td><?= htmlspecialchars($item['label']) ?></td>
+          <td><input type="number" class="nt-edit" data-field="qty" value="<?= htmlspecialchars((string)$q) ?>" step="any" min="0.001"></td>
+          <td><input type="number" class="nt-edit" data-field="price" value="<?= htmlspecialchars((string)$pr) ?>" step="any" min="0">
+            <div class="muted nt-hint" style="font-size:11.5px; margin-top:2px"></div></td>
+          <td class="nt-sum" style="white-space:nowrap"><?= number_format($q * $pr, 2) ?> <?= htmlspecialchars($poCurLabel) ?></td>
+          <td><button type="button" class="secondary small nt-del" title="Убрать из корзины">✕</button></td>
         </tr>
       <?php endforeach; ?>
+      </tbody>
     </table>
-    <div class="total" style="text-align:right; font-weight:700; margin-top:10px;">
-      Итого: <?= number_format($cartTotal, 2) ?> <?= htmlspecialchars($poCurLabel) ?>
-      <?php if ($poCurrency !== 'USD'): ?>
-        <div class="muted" style="font-weight:400">≈ <?= number_format($cartTotalUsd, 2) ?> $ по курсу <?= rtrim(rtrim(number_format($poRate, 4, '.', ''), '0'), '.') ?></div>
-      <?php endif; ?>
     </div>
+    <div class="total" style="text-align:right; font-weight:700; margin-top:10px;">
+      Итого (<span id="cartCount"><?= count($_SESSION['po_cart']) ?></span> поз.): <span id="cartTotalMain"><?= number_format($cartTotal, 2) ?> <?= htmlspecialchars($poCurLabel) ?></span>
+      <div class="muted" style="font-weight:400" id="cartTotalSub"><?php if ($poCurrency !== 'USD'): ?>≈ <?= number_format($cartTotalUsd, 2) ?> $ по курсу <?= rtrim(rtrim(number_format($poRate, 4, '.', ''), '0'), '.') ?><?php endif; ?></div>
+    </div>
+    <script src="assets/line_table.js?v=20260911"></script>
+    <script>
+    ntLineTable(document.getElementById('cartLines'), {
+      endpoint: 'orders.php', csrf: <?= json_encode(csrf_token()) ?>,
+      update: 'update_cart_item', remove: 'remove_from_cart', undo: 'add_to_cart', storeKey: 'nt_sort_cart',
+      bulkButton: document.getElementById('cartBulkDel'),
+      onTotals: t => {
+        document.getElementById('cartTotalMain').textContent = t.main;
+        document.getElementById('cartTotalSub').textContent = t.sub;
+        document.getElementById('cartCount').textContent = t.count;
+      }
+    });
+    </script>
     <form method="post" style="margin-top:10px">
   <?= csrf_field() ?>
       <input type="hidden" name="action" value="create_order">
@@ -417,7 +475,7 @@ require __DIR__ . '/includes/layout_top.php';
   <?php endif; ?>
 </div>
 
-<script src="assets/picker.js"></script>
+<script src="assets/picker.js?v=20260911"></script>
 <script>
 window.wireSupplierSearch('supplierSearch', 'supplierResults', function (s) {
   const form = document.createElement('form');
