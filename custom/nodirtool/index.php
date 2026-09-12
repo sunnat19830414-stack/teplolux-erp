@@ -59,6 +59,11 @@ foreach ($draftLikeGroups as $st => &$grp) {
 }
 unset($grp);
 
+// --- 2-бис. Пора заказывать перевозку: поставщик заканчивает в ближайшую неделю, рейса нет (12.09.2026)
+require_once __DIR__ . '/includes/order_dates.php';
+$readyWarnings = orders_awaiting_shipment($api);
+$readySocNames = $readyWarnings ? $api->getThirdpartiesByIds(array_map(fn($r) => (int)$r['socid'], $readyWarnings)) : [];
+
 // --- 3. Заказы в пути — только с близкой (≤3 дня) или просроченной датой доставки ---
 $deliveryWarnings = [];
 $runningRows = $api->getSupplierOrdersByStatus('running', 'id,ref,socid,total_ttc,delivery_date');
@@ -255,6 +260,30 @@ require __DIR__ . '/includes/layout_top.php';
     <?php endforeach; ?>
   <?php endif; ?>
 </div>
+
+<?php if ($readyWarnings): ?>
+<div class="card">
+  <h2>🏭 Пора заказывать перевозку</h2>
+  <p class="muted" style="margin-top:0">Поставщик заканчивает заказ в ближайшую неделю (или уже должен был
+    закончить), а рейс не оформлен. Договоритесь с перевозчиком и запишите рейс — тогда фрахт попадёт в
+    себестоимость, а дата прибытия начнёт напоминать о доставке.</p>
+  <table>
+    <tr><th>Заказ</th><th>Поставщик</th><th>Готов у поставщика</th><th class="num">Сумма</th><th></th></tr>
+    <?php foreach ($readyWarnings as $o): ?>
+      <?php $soc = $readySocNames[(int)$o['socid']] ?? null; $d = (int)$o['days_left']; ?>
+      <tr>
+        <td><a href="order_view.php?id=<?= (int)$o['id'] ?>"><?= htmlspecialchars($o['ref']) ?></a></td>
+        <td><?= htmlspecialchars(is_array($soc) ? ($soc['name'] ?? $soc['nom'] ?? '') : '') ?></td>
+        <td><?= date('d.m.Y', strtotime($o['ready_date'])) ?>
+          <span class="badge <?= $d < 0 ? 'badge-debt' : 'badge-warn' ?>">
+            <?= $d < 0 ? 'просрочено на ' . abs($d) . ' дн.' : ($d === 0 ? 'сегодня' : 'через ' . $d . ' дн.') ?></span></td>
+        <td class="num"><?= htmlspecialchars(money((float)($o['multicurrency_code'] && $o['multicurrency_code'] !== 'USD' ? ($o['multicurrency_total_ttc'] ?? $o['total_ttc']) : $o['total_ttc']), $o['multicurrency_code'] ?: 'USD')) ?></td>
+        <td><a class="btn secondary small" href="shipments.php">Записать рейс →</a></td>
+      </tr>
+    <?php endforeach; ?>
+  </table>
+</div>
+<?php endif; ?>
 
 <div class="card">
   <h2>🚚 Заказы в пути — скоро или уже просрочена доставка</h2>

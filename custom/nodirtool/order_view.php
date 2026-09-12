@@ -486,6 +486,14 @@ require __DIR__ . '/includes/layout_top.php';
     <div>
       <div><strong>Поставщик:</strong> <?= htmlspecialchars($supplierName) ?></div>
       <div><strong>Дата заказа:</strong> <?= !empty($order['date_commande']) ? date('d.m.Y', (int)$order['date_commande']) : '—' ?></div>
+      <?php
+        require_once __DIR__ . '/includes/order_dates.php';
+        $readyDate = order_ready_date($id);
+      ?>
+      <?php if ($readyDate !== ''): ?>
+        <div><strong>Готов у поставщика:</strong> <?= date('d.m.Y', strtotime($readyDate)) ?>
+          <span class="muted">— после этого пора везти</span></div>
+      <?php endif; ?>
       <?php if (!empty($order['delivery_date'])): ?>
         <div><strong>Ожидаемая доставка:</strong> <?= date('d.m.Y', (int)$order['delivery_date']) ?></div>
       <?php endif; ?>

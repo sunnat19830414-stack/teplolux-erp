@@ -42,7 +42,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $_SESSION['selected_shipment'] = (int)$r['id'];
             $_SESSION['_preserve_once']['selected_shipment'] = true;
-            flash_set('Рейс записан. Долг перевозчику начислен, фрахт учтён в себестоимости.', 'ok');
+            flash_set('Рейс записан. Долг перевозчику начислен, фрахт учтён в себестоимости.'
+                . (!empty($r['arrival_date'])
+                    ? ' Ожидаемое прибытие ' . date('d.m.Y', strtotime($r['arrival_date']))
+                      . ' записано в заказ — за 3 дня до него и при просрочке напомним на сводке.'
+                    : ' Дату прибытия можно указать в «Заказах в пути».'), 'ok');
             header('Location: shipments.php');
             exit;
         }
@@ -217,6 +221,10 @@ require __DIR__ . '/includes/layout_top.php';
       <div class="row">
         <div style="flex:1"><label>Согласованная цена</label>
           <input type="number" step="0.01" min="0.01" name="agreed_amount" required></div>
+        <div>
+          <label>Ожидаемое прибытие в Ташкент</label>
+          <input type="date" name="arrival_date">
+          <div class="muted" style="font-size:11.5px">запишется в заказ; по ней напомним о доставке</div></div>
         <div style="flex:0 0 130px"><label>Валюта</label>
           <select name="currency" id="curSel">
             <option value="USD">USD — $</option>

@@ -198,11 +198,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($action === 'validate_order') { $result = $api->validateSupplierOrder($orderId); $label = 'проведён'; }
         elseif ($action === 'approve_order') { $result = $api->approveSupplierOrder($orderId); $label = 'утверждён'; }
         elseif ($action === 'send_order') { $result = $api->sendSupplierOrder($orderId); $label = 'отправлен поставщику'; }
+        // Дата готовности у поставщика (12.09.2026): дата отправки + «типичный срок поставки» из карточки.
+        $readyNote = '';
+        if ($action === 'send_order' && $result !== null) {
+            require_once __DIR__ . '/includes/order_dates.php';
+            $ord = $api->getSupplierOrder($orderId);
+            $rd = is_array($ord) ? order_fill_ready_date_on_send($orderId, (int)($ord['socid'] ?? 0)) : '';
+            $readyNote = $rd !== ''
+                ? ' Поставщик должен закончить к ' . date('d.m.Y', strtotime($rd))
+                  . ' (срок из его карточки). За неделю до этого напомним оформить перевозку; дату можно поправить в «Заказах в пути».'
+                : '';
+        }
         if ($result === null) {
             $message = "Ошибка ($action) по заказу #$orderId: " . $api->lastError;
             $messageType = 'err';
         } else {
-            $message = "Заказ #$orderId $label ($who).";
+            $message = "Заказ #$orderId $label ($who)." . ($readyNote ?? '');
             $messageType = 'ok';
             // Статус заказа уже реально изменён — редирект (POST → GET), та же причина, что и выше.
             flash_set($message, $messageType);

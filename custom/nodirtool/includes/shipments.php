@@ -73,6 +73,9 @@ function shipments_ensure_tables(): void
     // Курсовая разница фрахта (11.09.2026): строка расхода, которую ведёт shipment_sync_fx().
     // Вид расхода скрыт (active=0) — вручную его не вводят.
     $db->query("ALTER TABLE llx_nt_shipment ADD COLUMN IF NOT EXISTS fk_fx_expense INT DEFAULT NULL");
+    // Ожидаемое прибытие в Ташкент (12.09.2026): спрашиваем при оформлении рейса и сразу пишем
+    // в заказ (date_livraison) — по ней сводка напоминает о доставке.
+    $db->query("ALTER TABLE llx_nt_shipment ADD COLUMN IF NOT EXISTS arrival_date DATE DEFAULT NULL");
     logistics_ensure_tables();
     $db->query("INSERT IGNORE INTO llx_nt_logistics_expense_type (code, name, active, sort_order, datec)
                 VALUES ('fx_diff', 'Курсовая разница (фрахт)', 0, 900, NOW())");
@@ -194,21 +197,29 @@ function shipment_create(array $d, string $who): array
     if (empty($exp['ok'])) return ['ok' => false, 'error' => $exp['error'] ?? 'Не удалось начислить долг перевозчику.'];
 
     $db = shipments_db();
+    $arrival = trim((string)($d['arrival_date'] ?? ''));
     $stmt = $db->prepare("INSERT INTO llx_nt_shipment
         (fk_carrier, route_from, route_to, truck_type, scope_type, scope_id,
-         agreed_amount, currency, rate, fk_expense, comment, datec, created_by)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),?)");
+         agreed_amount, currency, rate, fk_expense, comment, arrival_date, datec, created_by)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NOW(),?)");
     $from = (string)($d['route_from'] ?? '');
     $to   = (string)($d['route_to'] ?? '');
     $truck = (string)($d['truck_type'] ?? '');
     $expId = (int)($exp['expense_id'] ?? 0);
-    $stmt->bind_param('issssidsdiss', $carrierId, $from, $to, $truck, $scopeType, $scopeId,
-                      $amount, $currency, $rate, $expId, $comment, $who);
+    $arrivalVal = $arrival !== '' ? $arrival : null;
+    $stmt->bind_param('issssidsdisss', $carrierId, $from, $to, $truck, $scopeType, $scopeId,
+                      $amount, $currency, $rate, $expId, $comment, $arrivalVal, $who);
     $stmt->execute();
     $id = (int)$db->insert_id;
     $stmt->close();
 
-    return ['ok' => true, 'id' => $id, 'cost' => $exp];
+    // Дата прибытия сразу уходит в заказ(ы) — по ней работает напоминание о доставке на сводке.
+    $orders = 0;
+    if ($arrival !== '') {
+        require_once __DIR__ . '/order_dates.php';
+        $orders = order_set_delivery_date($scopeType, $scopeId, $arrival);
+    }
+    return ['ok' => true, 'id' => $id, 'cost' => $exp, 'arrival_date' => $arrival, 'orders_dated' => $orders];
 }
 
 /**

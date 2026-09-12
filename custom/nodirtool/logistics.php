@@ -13,6 +13,7 @@
  */
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/shipments.php';
+require_once __DIR__ . '/includes/order_dates.php';
 
 $message = '';
 $messageType = '';
@@ -23,6 +24,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'updat
     $deliveryDateStr = trim($_POST['delivery_date'] ?? '');
     $deliveryDateTs = $deliveryDateStr !== '' ? strtotime($deliveryDateStr) : null;
 
+    // Дата готовности у поставщика — своё доп.поле (12.09.2026), пишется напрямую.
+    order_set_ready_date($orderId, trim($_POST['ready_date'] ?? ''));
     // Перевозчик больше не передаётся — null означает «не трогать это поле» (см. докблок).
     $ok = $api->updateSupplierOrderDetails($orderId, null, $tracking, $deliveryDateTs);
     if (!$ok) {
@@ -65,6 +68,7 @@ foreach ($rows as $row) {
         'supplier' => is_array($soc) ? ($soc['name'] ?? $soc['nom'] ?? "#$socid") : "#$socid",
         'date' => !empty($row['date_commande']) ? date('d.m.Y', (int)$row['date_commande']) : '',
         'delivery_date' => !empty($full['delivery_date']) ? date('Y-m-d', (int)$full['delivery_date']) : '',
+        'ready_date' => order_ready_date($oid),
         'tracking_number' => $opts['options_tracking_number'] ?? '',
         'shipment' => $sh,
         'carrier_name' => is_array($carrierSoc) ? ($carrierSoc['name'] ?? $carrierSoc['nom'] ?? '') : '',
@@ -109,8 +113,14 @@ require __DIR__ . '/includes/layout_top.php';
         <input type="hidden" name="action" value="update_logistics">
         <input type="hidden" name="order_id" value="<?= $o['id'] ?>">
         <div>
-          <label>Ожидаемая дата доставки</label>
+          <label>Готов у поставщика</label>
+          <input type="date" name="ready_date" value="<?= htmlspecialchars($o['ready_date']) ?>">
+          <div class="muted" style="font-size:11.5px">когда поставщик закончит и товар можно везти</div>
+        </div>
+        <div>
+          <label>Ожидаемая доставка в Ташкент</label>
           <input type="date" name="delivery_date" value="<?= htmlspecialchars($o['delivery_date']) ?>">
+          <div class="muted" style="font-size:11.5px">ставится при оформлении рейса</div>
         </div>
         <div>
           <label>Номер накладной / трек-номер</label>
